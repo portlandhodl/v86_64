@@ -2845,6 +2845,7 @@ pub unsafe fn writable_or_pagefault_cpl(other_cpl: u8, addr: u64, size: i32) -> 
 pub fn translate_address_read_no_side_effects(address: u64) -> OrPageFault<u64> {
     unsafe { translate_address(address, false, *cpl == 3, false, false) }
 }
+#[inline]
 pub fn translate_address_read(address: u64) -> OrPageFault<u64> {
     unsafe { translate_address(address, false, *cpl == 3, false, true) }
 }
@@ -2852,6 +2853,7 @@ pub unsafe fn translate_address_read_jit(address: u64) -> OrPageFault<u64> {
     translate_address(address, false, *cpl == 3, true, true)
 }
 
+#[inline]
 pub unsafe fn translate_address_write(address: u64) -> OrPageFault<u64> {
     translate_address(address, true, *cpl == 3, false, true)
 }
@@ -3864,6 +3866,7 @@ pub fn check_tlb_invariants() {
 
 pub const DISABLE_EIP_TRANSLATION_OPTIMISATION: bool = false;
 
+#[inline]
 pub unsafe fn read_imm8() -> OrPageFault<i32> {
     let eip = *instruction_pointer;
     if DISABLE_EIP_TRANSLATION_OPTIMISATION || 0 != eip & !0xFFF ^ *last_virt_eip64 as u64 {
@@ -3876,8 +3879,10 @@ pub unsafe fn read_imm8() -> OrPageFault<i32> {
     return Ok(data8);
 }
 
+#[inline]
 pub unsafe fn read_imm8s() -> OrPageFault<i32> { return Ok(read_imm8()? << 24 >> 24); }
 
+#[inline]
 pub unsafe fn read_imm16() -> OrPageFault<i32> {
     // Two checks in one comparison:
     // 1. Did the high bits of eip change
@@ -3894,6 +3899,7 @@ pub unsafe fn read_imm16() -> OrPageFault<i32> {
     };
 }
 
+#[inline]
 pub unsafe fn read_imm32s() -> OrPageFault<i32> {
     // Analogue to the above comment
     if DISABLE_EIP_TRANSLATION_OPTIMISATION
@@ -3908,12 +3914,14 @@ pub unsafe fn read_imm32s() -> OrPageFault<i32> {
     };
 }
 
+#[inline]
 pub unsafe fn read_imm64s() -> OrPageFault<u64> {
     let low = read_imm32s()? as u32 as u64;
     let high = read_imm32s()? as u32 as u64;
     Ok(low | high << 32)
 }
 
+#[inline]
 pub unsafe fn is_osize_32() -> bool {
     dbg_assert!(!in_jit);
     if *is_64 {
@@ -3924,6 +3932,7 @@ pub unsafe fn is_osize_32() -> bool {
     return *is_32 != (*prefixes & prefix::PREFIX_MASK_OPSIZE == prefix::PREFIX_MASK_OPSIZE);
 }
 
+#[inline]
 pub unsafe fn is_asize_32() -> bool {
     dbg_assert!(!in_jit);
     if *is_64 {
@@ -4457,6 +4466,7 @@ pub unsafe fn segment_prefix(default_segment: i32) -> i32 {
     }
 }
 
+#[inline]
 pub unsafe fn get_seg_prefix(default_segment: i32) -> OrPageFault<i32> {
     dbg_assert!(!in_jit);
     let prefix = *prefixes & prefix::PREFIX_MASK_SEGMENT;
@@ -4476,6 +4486,7 @@ pub unsafe fn get_seg_prefix(default_segment: i32) -> OrPageFault<i32> {
 /// The segment base as a full 64-bit linear address part. In long mode the
 /// FS/GS bases come from their 64-bit MSRs; all other bases are forced to 0 in
 /// 64-bit mode (and every base fits in 32 bits in compatibility mode).
+#[inline]
 pub unsafe fn get_seg64(segment: i32) -> u64 {
     if *is_64 {
         match segment {
@@ -4489,6 +4500,7 @@ pub unsafe fn get_seg64(segment: i32) -> u64 {
     }
 }
 
+#[inline]
 pub unsafe fn get_seg_prefix64(default_segment: i32) -> OrPageFault<u64> {
     dbg_assert!(!in_jit);
     let prefix = *prefixes & prefix::PREFIX_MASK_SEGMENT;
@@ -4505,16 +4517,19 @@ pub unsafe fn get_seg_prefix64(default_segment: i32) -> OrPageFault<u64> {
     };
 }
 
+#[inline]
 pub unsafe fn get_seg_prefix_ds(offset: u64) -> OrPageFault<u64> {
     Ok(get_seg_prefix64(DS)?.wrapping_add(offset))
 }
 
+#[inline]
 pub unsafe fn get_seg_prefix_ss(offset: u64) -> OrPageFault<u64> {
     Ok(get_seg_prefix64(SS)?.wrapping_add(offset))
 }
 
 // imm_len: number of immediate bytes following modrm/sib/disp, needed for
 // RIP-relative addressing in 64-bit mode (ignored in 16/32-bit modes)
+#[inline]
 pub unsafe fn modrm_resolve(modrm_byte: i32, imm_len: i32) -> OrPageFault<u64> {
     if *is_64 {
         if *prefixes & prefix::PREFIX_MASK_ADDRSIZE != 0 {
@@ -4534,8 +4549,11 @@ pub unsafe fn modrm_resolve(modrm_byte: i32, imm_len: i32) -> OrPageFault<u64> {
     }
 }
 
+#[inline]
 pub unsafe fn run_instruction(opcode: i32) { gen::interpreter::run(opcode as u32) }
+#[inline]
 pub unsafe fn run_instruction0f_16(opcode: i32) { gen::interpreter0f::run(opcode as u32) }
+#[inline]
 pub unsafe fn run_instruction0f_32(opcode: i32) {
     if *is_64 && gen::interpreter0f::is_default_64_operand_size(opcode as u32) {
         // default-64-bit 0F instructions (push/pop fs/gs) in long mode
@@ -4728,6 +4746,7 @@ pub unsafe fn cycle_internal() {
     };
 }
 
+#[inline]
 pub unsafe fn get_phys_eip() -> OrPageFault<u64> {
     let eip = *instruction_pointer;
     if 0 != eip & !0xFFF ^ *last_virt_eip64 as u64 {
@@ -6002,8 +6021,10 @@ pub unsafe fn rex_b() -> i32 { (*prefixes & prefix::PREFIX_REX_B) as i32 >> 5 }
 #[inline]
 pub unsafe fn rex_w() -> bool { *prefixes & prefix::PREFIX_REX_W != 0 }
 
+#[inline]
 fn get_reg8_index(index: i32) -> i32 { return index << 3 & 24 | index >> 2 & 1; }
 
+#[inline]
 pub unsafe fn read_reg8(index: i32) -> i32 {
     dbg_assert!(index >= 0 && index < 16);
     if *prefixes & prefix::PREFIX_REX_PRESENT != 0 {
@@ -6015,6 +6036,7 @@ pub unsafe fn read_reg8(index: i32) -> i32 {
     return *reg8.offset(get_reg8_index(index) as isize) as i32;
 }
 
+#[inline]
 pub unsafe fn write_reg8(index: i32, value: i32) {
     dbg_assert!(index >= 0 && index < 16);
     if *prefixes & prefix::PREFIX_REX_PRESENT != 0 {
@@ -6025,13 +6047,16 @@ pub unsafe fn write_reg8(index: i32, value: i32) {
     *reg8.offset(get_reg8_index(index) as isize) = value as u8;
 }
 
+#[inline]
 fn get_reg16_index(index: i32) -> i32 { return index << 2; }
 
+#[inline]
 pub unsafe fn read_reg16(index: i32) -> i32 {
     dbg_assert!(index >= 0 && index < 16);
     return *reg16.offset(get_reg16_index(index) as isize) as i32;
 }
 
+#[inline]
 pub unsafe fn write_reg16(index: i32, value: i32) {
     dbg_assert!(index >= 0 && index < 16);
     *reg16.offset(get_reg16_index(index) as isize) = value as u16;
@@ -6040,31 +6065,37 @@ pub unsafe fn write_reg16(index: i32, value: i32) {
 // 8-bit access to the legacy high byte registers (AH/CH/DH/BH) by
 // instructions that hardcode them (sahf, div8, ...). Unlike
 // read_reg8/write_reg8 these are NOT remapped by a REX prefix.
+#[inline]
 pub unsafe fn read_reg8_legacy_high(index: i32) -> i32 {
     dbg_assert!(index >= 4 && index < 8);
     *reg8.offset(((index - 4) * 8 + 1) as isize) as i32
 }
+#[inline]
 pub unsafe fn write_reg8_legacy_high(index: i32, value: i32) {
     dbg_assert!(index >= 4 && index < 8);
     *reg8.offset(((index - 4) * 8 + 1) as isize) = value as u8;
 }
 
+#[inline]
 pub unsafe fn read_reg32(index: i32) -> i32 {
     dbg_assert!(index >= 0 && index < 16);
     *reg32.offset((index << 1) as isize)
 }
 
+#[inline]
 pub unsafe fn write_reg32(index: i32, value: i32) {
     dbg_assert!(index >= 0 && index < 16);
     // 32-bit writes zero-extend into the full 64-bit register
     *reg64.offset(index as isize) = value as u32 as u64;
 }
 
+#[inline]
 pub unsafe fn read_reg64(index: i32) -> u64 {
     dbg_assert!(index >= 0 && index < 16);
     *reg64.offset(index as isize)
 }
 
+#[inline]
 pub unsafe fn write_reg64(index: i32, value: u64) {
     dbg_assert!(index >= 0 && index < 16);
     *reg64.offset(index as isize) = value;
@@ -6072,10 +6103,13 @@ pub unsafe fn write_reg64(index: i32, value: u64) {
 
 // MMX register accessors: REX.R/REX.B do not extend MMX register fields, so
 // the index is masked to 3 bits (the generated modrm decode has REX folded in)
+#[inline]
 pub unsafe fn read_mmx32s(r: i32) -> i32 { (*fpu_st.offset((r & 7) as isize)).mantissa as i32 }
 
+#[inline]
 pub unsafe fn read_mmx64s(r: i32) -> u64 { (*fpu_st.offset((r & 7) as isize)).mantissa }
 
+#[inline]
 pub unsafe fn write_mmx_reg64(r: i32, data: u64) {
     let r = r & 7;
     *fpu_st.offset(r as isize) = softfloat::F80 {
@@ -6097,21 +6131,30 @@ pub unsafe fn reg_xmm_ptr(r: i32) -> *mut reg128 {
     }
 }
 
+#[inline]
 pub unsafe fn read_xmm_f32(r: i32) -> f32 { return (*reg_xmm_ptr(r)).f32[0]; }
 
+#[inline]
 pub unsafe fn read_xmm32(r: i32) -> i32 { return (*reg_xmm_ptr(r)).u32[0] as i32; }
 
+#[inline]
 pub unsafe fn read_xmm64s(r: i32) -> u64 { (*reg_xmm_ptr(r)).u64[0] }
 
+#[inline]
 pub unsafe fn read_xmm128s(r: i32) -> reg128 { return *reg_xmm_ptr(r); }
 
+#[inline]
 pub unsafe fn write_xmm_f32(r: i32, data: f32) { (*reg_xmm_ptr(r)).f32[0] = data; }
 
+#[inline]
 pub unsafe fn write_xmm32(r: i32, data: i32) { (*reg_xmm_ptr(r)).i32[0] = data; }
 
+#[inline]
 pub unsafe fn write_xmm64(r: i32, data: u64) { (*reg_xmm_ptr(r)).u64[0] = data }
+#[inline]
 pub unsafe fn write_xmm_f64(r: i32, data: f64) { (*reg_xmm_ptr(r)).f64[0] = data }
 
+#[inline]
 pub unsafe fn write_xmm128(r: i32, i0: i32, i1: i32, i2: i32, i3: i32) {
     let x = reg128 {
         u32: [i0 as u32, i1 as u32, i2 as u32, i3 as u32],
@@ -6119,10 +6162,12 @@ pub unsafe fn write_xmm128(r: i32, i0: i32, i1: i32, i2: i32, i3: i32) {
     *reg_xmm_ptr(r) = x;
 }
 
+#[inline]
 pub unsafe fn write_xmm128_2(r: i32, i0: u64, i1: u64) {
     *reg_xmm_ptr(r) = reg128 { u64: [i0, i1] };
 }
 
+#[inline]
 pub unsafe fn write_xmm_reg128(r: i32, data: reg128) { *reg_xmm_ptr(r) = data; }
 
 /// Set the fpu tag word to valid and the top-of-stack to 0 on mmx instructions
