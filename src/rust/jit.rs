@@ -4,7 +4,6 @@ use std::iter::FromIterator;
 use std::mem::{self, MaybeUninit};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
-use std::sync::{Mutex, MutexGuard};
 
 use crate::analysis;
 use crate::analysis::AnalysisType;
@@ -97,27 +96,61 @@ pub const CHECK_JIT_STATE_INVARIANTS: bool = false;
 
 const MAX_INSTRUCTION_LENGTH: u32 = 16;
 
-static JIT_STATE: Mutex<MaybeUninit<JitState>> = Mutex::new(MaybeUninit::uninit());
-fn get_jit_state() -> JitStateRef { JitStateRef(JIT_STATE.try_lock().unwrap()) }
+static mut JIT_STATE: MaybeUninit<JitState> = MaybeUninit::uninit();
 
-struct JitStateRef(MutexGuard<'static, MaybeUninit<JitState>>);
+/// Access the global JIT state.
+///
+/// Zero synchronisation: the wasm32 target is single-threaded and the JIT is never reentered —
+/// none of the functions called while a `JitStateRef` is alive calls back into `jit_state()`
+/// (the reachable JS imports, `codegen_finalize` and `jit_clear_func`, only link/clear wasm
+/// modules; `codegen_finalize_finished` runs on a later event-loop turn). The old
+/// Mutex+v86-debug-assert wrapped this same invariant; it still holds and is checked in debug
+/// builds via `JIT_STATE_BORROWED`.
+#[inline(always)]
+fn jit_state() -> JitStateRef { JitStateRef::new() }
 
+#[cfg(debug_assertions)]
+static mut JIT_STATE_BORROWED: bool = false;
+
+struct JitStateRef(&'static mut JitState);
+
+impl JitStateRef {
+    #[inline(always)]
+    #[allow(static_mut_refs)]
+    fn new() -> Self {
+        #[cfg(debug_assertions)]
+        unsafe {
+            dbg_assert!(!JIT_STATE_BORROWED, "reentrant access to JIT state");
+            JIT_STATE_BORROWED = true;
+        }
+        JitStateRef(unsafe { JIT_STATE.assume_init_mut() })
+    }
+}
+#[cfg(debug_assertions)]
+impl Drop for JitStateRef {
+    fn drop(&mut self) {
+        #[allow(static_mut_refs)]
+        unsafe {
+            JIT_STATE_BORROWED = false
+        }
+    }
+}
 impl Deref for JitStateRef {
     type Target = JitState;
-    fn deref(&self) -> &Self::Target { unsafe { self.0.assume_init_ref() } }
+    fn deref(&self) -> &Self::Target { self.0 }
 }
 impl DerefMut for JitStateRef {
-    fn deref_mut(&mut self) -> &mut Self::Target { unsafe { self.0.assume_init_mut() } }
+    fn deref_mut(&mut self) -> &mut Self::Target { self.0 }
 }
 
 #[no_mangle]
 pub fn rust_init() {
     dbg_assert!(std::mem::size_of::<[Option<NonNull<cpu::Code>>; 0x100000]>() == 0x100000 * 4);
 
-    let _ = JIT_STATE
-        .try_lock()
-        .unwrap()
-        .write(JitState::create_and_initialise());
+    #[allow(static_mut_refs)]
+    unsafe {
+        JIT_STATE.write(JitState::create_and_initialise());
+    }
 
     use std::panic;
 
@@ -401,7 +434,7 @@ pub fn is_near_end_of_page(address: u64) -> bool {
 pub fn jit_find_cache_entry(phys_address: u64, state_flags: CachedStateFlags) -> CachedCode {
     // TODO: dedup with jit_find_cache_entry_in_page?
     // NOTE: This is currently only used for invariant/missed-entry-point checking
-    let ctx = get_jit_state();
+    let ctx = jit_state();
 
     match ctx.pages.get(&Page::page_of(phys_address)) {
         Some(PageInfo {
@@ -906,7 +939,7 @@ pub fn jit_force_generate_unsafe(virt_addr: i32) {
         JIT_THRESHOLD,
     );
     // in progress, or already finished (synchronous compilation)
-    let ctx = get_jit_state();
+    let ctx = jit_state();
     dbg_assert!(ctx.compiling.is_some() || ctx.pages.contains_key(&Page::page_of(phys_addr)));
 }
 
@@ -1151,7 +1184,7 @@ pub fn codegen_finalize_finished(
     state_flags: CachedStateFlags,
 ) {
     finish_compilation(
-        &mut get_jit_state(),
+        &mut jit_state(),
         wasm_table_index,
         phys_addr as u64,
         state_flags,
@@ -1241,7 +1274,7 @@ fn finish_compilation(
 
 /// virt_page: the (up to 36-bit) page number of the virtual page
 pub fn update_tlb_code(virt_page: u64, phys_page: Page) {
-    let ctx = get_jit_state();
+    let ctx = jit_state();
 
     match ctx.pages.get(&phys_page) {
         Some(PageInfo {
@@ -2371,7 +2404,7 @@ pub fn jit_increase_hotness_and_maybe_compile(
         return;
     }
 
-    let mut ctx = get_jit_state();
+    let mut ctx = jit_state();
     let is_compiling = ctx.compiling.is_some();
     let page = Page::page_of(phys_address);
     let (hotness, entry_points) = ctx.entry_points.entry(page).or_insert_with(|| {
@@ -2572,7 +2605,7 @@ pub fn jit_dirty_cache(start_addr: u64, end_addr: u64) {
     let end_page = Page::page_of(end_addr - 1);
 
     for page in start_page.to_u32()..end_page.to_u32() + 1 {
-        jit_dirty_page_ctx(&mut get_jit_state(), Page::of_u32(page));
+        jit_dirty_page_ctx(&mut jit_state(), Page::of_u32(page));
     }
 }
 /// Physical addresses as f64: may exceed 32 bits (and end_addr may be exactly 4 GiB)
@@ -2582,7 +2615,7 @@ pub fn jit_dirty_cache_js(start_addr: f64, end_addr: f64) {
 }
 
 #[no_mangle]
-pub fn jit_dirty_page(page: Page) { jit_dirty_page_ctx(&mut get_jit_state(), page) }
+pub fn jit_dirty_page(page: Page) { jit_dirty_page_ctx(&mut jit_state(), page) }
 
 /// dirty pages in the range of start_addr and end_addr, which must span at most two pages
 pub fn jit_dirty_cache_small(start_addr: u64, end_addr: u64) {
@@ -2591,7 +2624,7 @@ pub fn jit_dirty_cache_small(start_addr: u64, end_addr: u64) {
     let start_page = Page::page_of(start_addr);
     let end_page = Page::page_of(end_addr - 1);
 
-    let mut ctx = get_jit_state();
+    let mut ctx = jit_state();
     jit_dirty_page_ctx(&mut ctx, start_page);
 
     // Note: This can't happen when paging is enabled, as writes across
@@ -2603,7 +2636,7 @@ pub fn jit_dirty_cache_small(start_addr: u64, end_addr: u64) {
 }
 
 #[no_mangle]
-pub fn jit_clear_cache_js() { jit_clear_cache(&mut get_jit_state()) }
+pub fn jit_clear_cache_js() { jit_clear_cache(&mut jit_state()) }
 
 fn jit_clear_cache(ctx: &mut JitState) {
     let mut pages_with_code = HashSet::default();
@@ -2620,14 +2653,14 @@ fn jit_clear_cache(ctx: &mut JitState) {
     }
 }
 
-pub fn jit_page_has_code(page: Page) -> bool { jit_page_has_code_ctx(&mut get_jit_state(), page) }
+pub fn jit_page_has_code(page: Page) -> bool { jit_page_has_code_ctx(&mut jit_state(), page) }
 
 fn jit_page_has_code_ctx(ctx: &mut JitState, page: Page) -> bool {
     ctx.pages.contains_key(&page) || ctx.entry_points.contains_key(&page)
 }
 
 pub fn jit_page_has_wasm_table_index(page: Page, wasm_table_index: u16) -> bool {
-    let ctx = get_jit_state();
+    let ctx = jit_state();
     match ctx.pages.get(&page) {
         Some(info) => {
             info.wasm_table_index.to_u16() == wasm_table_index
@@ -2643,7 +2676,7 @@ pub fn jit_page_has_wasm_table_index(page: Page, wasm_table_index: u16) -> bool 
 #[no_mangle]
 pub fn jit_get_wasm_table_index_free_list_count() -> u32 {
     if cfg!(feature = "profiler") {
-        get_jit_state().wasm_table_index_free_list.len() as u32
+        jit_state().wasm_table_index_free_list.len() as u32
     }
     else {
         0
@@ -2652,7 +2685,7 @@ pub fn jit_get_wasm_table_index_free_list_count() -> u32 {
 #[no_mangle]
 pub fn jit_get_cache_size() -> u32 {
     if cfg!(feature = "profiler") {
-        get_jit_state()
+        jit_state()
             .pages
             .values()
             .map(|p| p.entry_points.len() as u32)
@@ -2665,7 +2698,7 @@ pub fn jit_get_cache_size() -> u32 {
 
 #[cfg(feature = "profiler")]
 pub fn check_missed_entry_points(phys_address: u64, state_flags: CachedStateFlags) {
-    let ctx = get_jit_state();
+    let ctx = jit_state();
 
     if let Some(infos) = ctx.pages.get(&Page::page_of(phys_address)) {
         if infos.state_flags != state_flags {
