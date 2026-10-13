@@ -2487,6 +2487,8 @@ IDEInterface.prototype.do_ata_write_sectors_dma = function()
 
     const buffer = new Uint8Array(byte_count);
 
+    this.cpu.check_mem_views();
+
     do {
         var prd_addr = this.cpu.read32s(prdt_start) >>> 0;
         var prd_count = this.cpu.read16(prdt_start + 4);

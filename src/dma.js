@@ -346,6 +346,7 @@ DMA.prototype.do_write = function(buffer, start, len, channel, fn)
             this.channel_count[channel] = this.channel_count_init[channel];
         }
 
+        this.cpu.check_mem_views();
         buffer.set(start,
                 this.cpu.mem8.subarray(addr, addr + read_bytes),
                 () =>
