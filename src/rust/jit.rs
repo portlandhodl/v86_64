@@ -1514,12 +1514,8 @@ fn jit_generate_module(
     // chaining, so that tail calls between modules compiled with different chaining settings
     // are valid; chaining only decides whether the table is imported and the exit code
     // tail-calls the next module.
-    let chaining = if state_flags.is_64() {
-        unsafe { JIT64_CHAINING }
-    }
-    else {
-        unsafe { JIT32_CHAINING }
-    };
+    let chaining =
+        if state_flags.is_64() { unsafe { JIT64_CHAINING } } else { unsafe { JIT32_CHAINING } };
     if state_flags.is_64() {
         builder.set_jit64_function(chaining);
     }

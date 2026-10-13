@@ -3,10 +3,7 @@ pub fn call_indirect1(f: fn(u16), x: u16) { f(x); }
 
 /// Call a module for 16/32-bit code, which gets the registers as arguments
 #[no_mangle]
-pub unsafe fn call_indirect_jit32(
-    f: fn(u16, u32, u32, u32, u32, u32, u32, u32, u32),
-    x: u16,
-) {
+pub unsafe fn call_indirect_jit32(f: fn(u16, u32, u32, u32, u32, u32, u32, u32, u32), x: u16) {
     use crate::cpu::cpu::read_reg32;
     f(
         x,

@@ -3474,8 +3474,7 @@ pub fn gen_chain_to_next_module32(ctx: &mut JitContext, reenter_label: Label) {
     // must not either. They are armed by instructions run through the interpreter (popf, iret,
     // mov dr7, ...); blocks containing them end in BasicBlockType::Exit or leave through the
     // has_sti path, and reach the exit code here.
-    ctx.builder
-        .load_fixed_i32(global_pointers::flags as u32);
+    ctx.builder.load_fixed_i32(global_pointers::flags as u32);
     ctx.builder
         .const_i32(crate::cpu::cpu::FLAG_TRAP | crate::cpu::cpu::FLAG_RF);
     ctx.builder.and_i32();
@@ -3551,15 +3550,13 @@ pub fn gen_chain_to_next_module32(ctx: &mut JitContext, reenter_label: Label) {
                         ctx.builder.get_local(&code);
                         ctx.builder
                             .load_aligned_u16(offset_of!(Code, wasm_table_index) as u32);
-                        ctx.builder
-                            .const_i32(ctx.wasm_table_index.to_u16() as i32);
+                        ctx.builder.const_i32(ctx.wasm_table_index.to_u16() as i32);
                         ctx.builder.eq_i32();
                         ctx.builder.if_void();
                         {
                             ctx.builder.get_local(&state);
-                            ctx.builder.set_local(
-                                &ctx.builder.arg_local_initial_state.unsafe_clone(),
-                            );
+                            ctx.builder
+                                .set_local(&ctx.builder.arg_local_initial_state.unsafe_clone());
                             // counted in the instruction counter already
                             ctx.builder.const_i32(0);
                             ctx.builder.set_local(&ctx.instruction_counter);
@@ -3567,10 +3564,7 @@ pub fn gen_chain_to_next_module32(ctx: &mut JitContext, reenter_label: Label) {
                         }
                         ctx.builder.block_end();
 
-                        gen_profiler_stat_increment(
-                            ctx.builder,
-                            profiler::stat::RUN_FROM_CACHE,
-                        );
+                        gen_profiler_stat_increment(ctx.builder, profiler::stat::RUN_FROM_CACHE);
                         ctx.builder.get_local(&state);
                         for i in 0..8 {
                             ctx.builder.get_local(&ctx.register_locals[i]);
