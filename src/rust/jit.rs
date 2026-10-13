@@ -171,19 +171,179 @@ enum CompilingPageState {
     CompilingWritten,
 }
 
+/// Flat per-physical-page JIT bookkeeping: the interpreter's hotness counter and a handle to
+/// the page's entry-point set. One per covered physical page (see JitState::page_states).
+#[derive(Clone, Copy)]
+struct PageJitSlot {
+    hotness: u32,
+    /// index+1 into entry_sets, 0 = the page has no entry-point set. The empty slot (0) implies
+    /// hotness == 0 (hotness and the set are created together, and clearing a page zeroes both)
+    /// and no PageInfo / no compilation in progress for the page (compiled and compiling pages
+    /// always have entry-point sets) — dirtying such a page cannot invalidate anything.
+    entry_set: u32,
+}
+impl PageJitSlot {
+    const EMPTY: PageJitSlot = PageJitSlot {
+        hotness: 0,
+        entry_set: 0,
+    };
+}
+
+struct EntryPointSet {
+    page: Page,
+    offsets: HashSet<u16>,
+}
+
 struct JitState {
     wasm_builder: WasmBuilder,
 
-    // as an alternative to HashSet, we could use a bitmap of 4096 bits here
-    // (faster, but uses much more memory)
-    // or a compressed bitmap (likely faster)
-    // or HashSet<u32> rather than nested
-    entry_points: HashMap<Page, (u32, HashSet<u16>)>,
+    /// Hotness counters and entry-point-set handles per physical page, indexed directly by page
+    /// number and sized once the memory size is known (init_page_state_coverage): the low 4 GiB
+    /// (which includes all executable mmio aliases, e.g. the BIOS at 0xFFFFF) plus, in mem64
+    /// builds, the high RAM. Pages outside the covered range (never RAM: only reachable when a
+    /// guest maps nonexistent memory above the RAM top, or any page before coverage is
+    /// established) go through fallback_hotness/fallback_entry_points instead — the fallback
+    /// path is exactly the old HashMap behaviour.
+    page_states: Vec<PageJitSlot>,
+    /// Arena backing the per-page sets referenced by page_states (and the history of visited
+    /// instruction offsets — entry points — on each executed page). A per-page set is created
+    /// lazily when the interpreter first runs a block on the page, so pages that are never
+    /// executed (and never compiled) cost only 8 bytes in page_states.
+    entry_sets: Vec<Option<EntryPointSet>>,
+    entry_sets_free: Vec<u32>,
+    fallback_hotness: HashMap<Page, u32>,
+    fallback_entry_points: HashMap<Page, HashSet<u16>>,
     pages: HashMap<Page, PageInfo>,
     wasm_table_index_free_list: Vec<WasmTableIndex>,
     compiling: Option<(WasmTableIndex, CompilingPageState)>,
     #[cfg(debug_assertions)]
     wasm_table_index_to_page: HashMap<WasmTableIndex, HashSet<Page>>,
+}
+
+/// The page_states index of a page, if the page is covered by the flat table
+#[inline(always)]
+fn page_slot(states: &Vec<PageJitSlot>, page: Page) -> Option<usize> {
+    let i = page.to_u32() as usize;
+    if i < states.len() {
+        Some(i)
+    }
+    else {
+        None
+    }
+}
+
+/// Mutable access to a page's hotness counter (flat table or fallback map)
+#[inline(always)]
+fn hotness_mut(ctx: &mut JitState, page: Page) -> &mut u32 {
+    match page_slot(&ctx.page_states, page) {
+        Some(i) => &mut ctx.page_states[i].hotness,
+        None => ctx.fallback_hotness.entry(page).or_insert(0),
+    }
+}
+
+/// Zero a page's hotness counter (as the old code did by resetting the entry in place)
+#[inline]
+fn reset_hotness(ctx: &mut JitState, page: Page) {
+    match page_slot(&ctx.page_states, page) {
+        Some(i) => ctx.page_states[i].hotness = 0,
+        None => {
+            if let Some(h) = ctx.fallback_hotness.get_mut(&page) {
+                *h = 0;
+            }
+        },
+    }
+}
+
+fn get_entry_set<'a>(ctx: &'a JitState, page: Page) -> Option<&'a HashSet<u16>> {
+    match page_slot(&ctx.page_states, page) {
+        Some(i) => {
+            let e = ctx.page_states[i].entry_set;
+            if e == 0 {
+                None
+            }
+            else {
+                ctx.entry_sets[(e - 1) as usize]
+                    .as_ref()
+                    .map(|s| &s.offsets)
+            }
+        },
+        None => ctx.fallback_entry_points.get(&page),
+    }
+}
+
+fn has_entry_points(ctx: &JitState, page: Page) -> bool {
+    match page_slot(&ctx.page_states, page) {
+        Some(i) => ctx.page_states[i].entry_set != 0,
+        None => ctx.fallback_entry_points.contains_key(&page),
+    }
+}
+
+/// Get or create the page's entry-point set; the second return value is true when it was
+/// created by this call. Creation has no other side effects; the caller at the block-exit hot
+/// path additionally marks the page's tlb entries (as the old or_insert_with closure did).
+fn get_or_create_entry_set(ctx: &mut JitState, page: Page) -> (&mut HashSet<u16>, bool) {
+    match page_slot(&ctx.page_states, page) {
+        Some(i) => {
+            let e = ctx.page_states[i].entry_set;
+            if e != 0 {
+                let idx = (e - 1) as usize;
+                return (&mut ctx.entry_sets[idx].as_mut().unwrap().offsets, false);
+            }
+            let idx = match ctx.entry_sets_free.pop() {
+                Some(idx) => idx as usize,
+                None => {
+                    let idx = ctx.entry_sets.len();
+                    ctx.entry_sets.push(None);
+                    idx
+                },
+            };
+            ctx.entry_sets[idx] = Some(EntryPointSet {
+                page,
+                offsets: HashSet::default(),
+            });
+            ctx.page_states[i].entry_set = idx as u32 + 1;
+            (&mut ctx.entry_sets[idx].as_mut().unwrap().offsets, true)
+        },
+        None => match ctx.fallback_entry_points.entry(page) {
+            std::collections::hash_map::Entry::Occupied(o) => (o.into_mut(), false),
+            std::collections::hash_map::Entry::Vacant(v) => (v.insert(HashSet::default()), true),
+        },
+    }
+}
+
+/// Drop a page's entry-point set (if any) and zero its hotness counter; returns whether the
+/// page had an entry-point set. Old equivalent: removing the page from the entry_points map.
+fn clear_page_hotness_and_entry_points(ctx: &mut JitState, page: Page) -> bool {
+    match page_slot(&ctx.page_states, page) {
+        Some(i) => {
+            let slot = &mut ctx.page_states[i];
+            slot.hotness = 0;
+            let e = mem::replace(&mut slot.entry_set, 0);
+            if e == 0 {
+                false
+            }
+            else {
+                let idx = (e - 1) as usize;
+                dbg_assert!(ctx.entry_sets[idx].as_ref().unwrap().page == page);
+                ctx.entry_sets[idx] = None;
+                ctx.entry_sets_free.push(e - 1);
+                true
+            }
+        },
+        None => {
+            ctx.fallback_hotness.remove(&page);
+            ctx.fallback_entry_points.remove(&page).is_some()
+        },
+    }
+}
+
+/// Size page_states to cover the given number of physical pages. Called once from
+/// memory::allocate_memory; before that (and for pages beyond the covered range) every page
+/// takes the fallback path.
+pub fn init_page_state_coverage(pages: u32) {
+    let mut ctx = jit_state();
+    dbg_assert!(ctx.page_states.is_empty());
+    ctx.page_states = vec![PageJitSlot::EMPTY; pages as usize];
 }
 
 fn check_jit_state_invariants(ctx: &mut JitState) {
@@ -193,7 +353,7 @@ fn check_jit_state_invariants(ctx: &mut JitState) {
 
     match &ctx.compiling {
         Some((_, CompilingPageState::Compiling { pages })) => {
-            dbg_assert!(pages.keys().all(|page| ctx.entry_points.contains_key(page)));
+            dbg_assert!(pages.keys().all(|page| has_entry_points(ctx, *page)));
         },
         _ => {},
     }
@@ -229,7 +389,7 @@ fn check_jit_state_invariants(ctx: &mut JitState) {
 
     match &ctx.compiling {
         Some((_, CompilingPageState::Compiling { pages })) => {
-            dbg_assert!(pages.keys().all(|page| ctx.entry_points.contains_key(page)));
+            dbg_assert!(pages.keys().all(|page| has_entry_points(ctx, *page)));
         },
         _ => {},
     }
@@ -250,11 +410,11 @@ fn check_jit_state_invariants(ctx: &mut JitState) {
             let tlb_has_code = entry as i32 & cpu::TLB_HAS_CODE == cpu::TLB_HAS_CODE;
 
             let infos = ctx.pages.get(&tlb_physical_page);
-            let entry_points = ctx.entry_points.get(&tlb_physical_page);
+            let has_entry_points = has_entry_points(ctx, tlb_physical_page);
             dbg_assert!(tlb_has_code || !w.is_some());
             dbg_assert!(tlb_has_code || !infos.is_some());
-            dbg_assert!(tlb_has_code || !entry_points.is_some());
-            //dbg_assert!((w.is_some() || page.is_some() || entry_points.is_some()) == tlb_has_code); // XXX: check this
+            dbg_assert!(tlb_has_code || !has_entry_points);
+            //dbg_assert!((w.is_some() || page.is_some() || has_entry_points) == tlb_has_code); // XXX: check this
         }
     }
 }
@@ -267,7 +427,11 @@ impl JitState {
         JitState {
             wasm_builder: WasmBuilder::new(),
 
-            entry_points: HashMap::default(),
+            page_states: Vec::new(),
+            entry_sets: Vec::new(),
+            entry_sets_free: Vec::new(),
+            fallback_hotness: HashMap::default(),
+            fallback_entry_points: HashMap::default(),
             pages: HashMap::default(),
 
             wasm_table_index_free_list: Vec::from_iter(wasm_table_indices),
@@ -577,7 +741,7 @@ fn jit_find_basic_blocks(
 
         if !pages.contains(&phys_page) {
             // page seen for the first time, handle entry points
-            if let Some((hotness, entry_points)) = ctx.entry_points.get_mut(&phys_page) {
+            if let Some(entry_points) = get_entry_set(ctx, phys_page) {
                 let existing_entry_points = match ctx.pages.get(&phys_page) {
                     Some(PageInfo { entry_points, .. }) => {
                         HashSet::from_iter(entry_points.iter().map(|x| x.0))
@@ -600,7 +764,8 @@ fn jit_find_basic_blocks(
                 //    entry_points.union(&existing_entry_points).count() == entry_points.len()
                 //);
 
-                *hotness = 0;
+                reset_hotness(ctx, phys_page);
+                let entry_points = get_entry_set(ctx, phys_page).unwrap();
 
                 for &addr_low in entry_points.iter() {
                     let addr = virt_target & !0xFFF | addr_low as u64;
@@ -955,7 +1120,7 @@ fn jit_analyze_and_generate(
 
     dbg_assert!(ctx.compiling.is_none());
 
-    let (_, entry_points) = match ctx.entry_points.get(&page) {
+    let entry_points = match get_entry_set(ctx, page) {
         None => return,
         Some(entry_points) => entry_points,
     };
@@ -1137,9 +1302,7 @@ fn jit_analyze_and_generate(
             entry_points: Vec::new(),
             hidden_wasm_table_indices: Vec::new(),
         });
-        ctx.entry_points
-            .entry(p)
-            .or_insert_with(|| (0, HashSet::default()));
+        get_or_create_entry_set(ctx, p);
     }
     for &(addr, state) in &entries {
         let code = page_info.get_mut(&Page::page_of(addr)).unwrap();
@@ -2407,24 +2570,25 @@ pub fn jit_increase_hotness_and_maybe_compile(
     let mut ctx = jit_state();
     let is_compiling = ctx.compiling.is_some();
     let page = Page::page_of(phys_address);
-    let (hotness, entry_points) = ctx.entry_points.entry(page).or_insert_with(|| {
+    let (entry_points, created) = get_or_create_entry_set(&mut ctx, page);
+    if created {
         cpu::tlb_set_has_code(page, true);
         profiler::stat_increment(stat::RUN_INTERPRETED_NEW_PAGE);
-        (0, HashSet::default())
-    });
+    }
 
     if !is_near_end_of_page(phys_address) {
         entry_points.insert(phys_address as u16 & 0xFFF);
     }
 
-    *hotness += heat;
+    let hotness = hotness_mut(&mut ctx, page);
+    *hotness = hotness.saturating_add(heat);
     if *hotness >= unsafe { JIT_HOTNESS_THRESHOLD } {
         if is_compiling {
             return;
         }
         // only try generating if we're in the correct address space
         if cpu::translate_address_read_no_side_effects(virt_address) == Ok(phys_address) {
-            *hotness = 0;
+            reset_hotness(&mut ctx, page);
             jit_analyze_and_generate(&mut ctx, virt_address, phys_address, cs_offset, state_flags)
         }
         else {
@@ -2487,6 +2651,19 @@ fn free_wasm_table_index(ctx: &mut JitState, wasm_table_index: WasmTableIndex) {
 
 /// Register a write in this page: Delete all present code
 fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
+    // Fast path: a page without an entry-point set holds no JIT state at all — no hotness
+    // counter (created together with the set), no PageInfo (compiled pages keep their set) and
+    // it cannot be under compilation (compiling pages hold sets) — so dirtying it can't
+    // invalidate anything. This covers virtually all writes: data pages, page-table walks'
+    // accessed/dirty-bit updates, DMA, ... Pages outside the flat table's coverage take the
+    // general path (their state lives in the fallback maps).
+    if let Some(i) = page_slot(&ctx.page_states, page) {
+        if ctx.page_states[i].entry_set == 0 {
+            profiler::stat_increment(stat::DIRTY_PAGE_DID_NOT_HAVE_CODE);
+            return;
+        }
+    }
+
     let mut did_have_code = false;
 
     if let Some(PageInfo {
@@ -2541,7 +2718,7 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
                             if wasm_table_index == w {
                                 cpu::code_free(c);
                                 *slot = None;
-                                if !ctx.entry_points.contains_key(&tlb_physical_page)
+                                if !has_entry_points(ctx, tlb_physical_page)
                                     && !ctx.pages.contains_key(&tlb_physical_page)
                                 {
                                     cpu::tlb_put_entry(
@@ -2559,21 +2736,18 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
         }
     }
 
-    match ctx.entry_points.remove(&page) {
-        None => {},
-        Some(_) => {
-            profiler::stat_increment(stat::INVALIDATE_PAGE_HAD_ENTRY_POINTS);
-            did_have_code = true;
+    if clear_page_hotness_and_entry_points(ctx, page) {
+        profiler::stat_increment(stat::INVALIDATE_PAGE_HAD_ENTRY_POINTS);
+        did_have_code = true;
 
-            match &ctx.compiling {
-                Some((index, CompilingPageState::Compiling { pages })) => {
-                    if pages.contains_key(&page) {
-                        ctx.compiling = Some((*index, CompilingPageState::CompilingWritten));
-                    }
-                },
-                _ => {},
-            }
-        },
+        match &ctx.compiling {
+            Some((index, CompilingPageState::Compiling { pages })) => {
+                if pages.contains_key(&page) {
+                    ctx.compiling = Some((*index, CompilingPageState::CompilingWritten));
+                }
+            },
+            _ => {},
+        }
     }
 
     match &ctx.compiling {
@@ -2641,7 +2815,10 @@ pub fn jit_clear_cache_js() { jit_clear_cache(&mut jit_state()) }
 fn jit_clear_cache(ctx: &mut JitState) {
     let mut pages_with_code = HashSet::default();
 
-    for &p in ctx.entry_points.keys() {
+    for entry_set in ctx.entry_sets.iter().flatten() {
+        pages_with_code.insert(entry_set.page);
+    }
+    for &p in ctx.fallback_entry_points.keys() {
         pages_with_code.insert(p);
     }
     for &p in ctx.pages.keys() {
@@ -2655,8 +2832,8 @@ fn jit_clear_cache(ctx: &mut JitState) {
 
 pub fn jit_page_has_code(page: Page) -> bool { jit_page_has_code_ctx(&mut jit_state(), page) }
 
-fn jit_page_has_code_ctx(ctx: &mut JitState, page: Page) -> bool {
-    ctx.pages.contains_key(&page) || ctx.entry_points.contains_key(&page)
+fn jit_page_has_code_ctx(ctx: &JitState, page: Page) -> bool {
+    ctx.pages.contains_key(&page) || has_entry_points(ctx, page)
 }
 
 pub fn jit_page_has_wasm_table_index(page: Page, wasm_table_index: u16) -> bool {
