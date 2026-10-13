@@ -128,6 +128,13 @@ pub fn allocate_memory(size: u32) -> u32 {
     unsafe {
         mem8 = ptr;
     };
+    unsafe {
+        // flat per-physical-page JIT hotness/entry-point bookkeeping: cover the low 4 GiB
+        // (which includes executable mmio aliases like the BIOS at 0xFFFFF) plus the high RAM
+        jit::init_page_state_coverage(
+            (HIGH_MEMORY_START >> 12) as u32 + (*high_memory_size >> 12) as u32,
+        );
+    }
     ptr as u32
 }
 

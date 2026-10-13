@@ -2942,7 +2942,8 @@ pub unsafe fn translate_address_write_and_can_skip_dirty(address: u64) -> OrPage
 //
 // Note that PAE entries are 64-bit, and can describe physical addresses over 32
 // bits; the supported physical address width is given by PAE_ENTRY_RSVD.
-#[cold]
+//
+// Not #[cold]: this is the only TLB fill path and runs constantly in walk-heavy phases.
 pub unsafe fn do_page_walk(
     addr: u64,
     for_writing: bool,
