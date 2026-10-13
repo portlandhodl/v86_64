@@ -51,6 +51,24 @@ BusConnector.prototype.unregister = function(name, fn)
 };
 
 /**
+ * Check whether send(name, ...) would reach any listeners on the other side
+ *
+ * @param {string} name
+ * @return {boolean}
+ */
+BusConnector.prototype.has_listeners = function(name)
+{
+    if(!this.pair)
+    {
+        return false;
+    }
+
+    var listeners = this.pair.listeners[name];
+
+    return listeners !== undefined && listeners.length !== 0;
+};
+
+/**
  * Send ("emit") a message
  *
  * @param {string} name
