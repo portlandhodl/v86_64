@@ -28,7 +28,7 @@ use std::ptr;
 
 mod wasm {
     extern "C" {
-        pub fn call_indirect1(f: i32, x: u16);
+        pub fn call_indirect_jit32(f: i32, x: u16);
         pub fn call_indirect_jit64(f: i32, x: u16);
     }
 }
@@ -4649,7 +4649,8 @@ pub unsafe fn cycle_internal() {
             );
         }
         else {
-            wasm::call_indirect1(
+            // modules for 16/32-bit code get the registers as arguments
+            wasm::call_indirect_jit32(
                 wasm_table_index as i32 + WASM_TABLE_OFFSET as i32,
                 initial_state,
             );

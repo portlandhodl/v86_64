@@ -169,6 +169,11 @@ Hint: Use tests/expect/run.js --accept-all to accept all changes (use git diff t
 
             const START_ADDRESS = 0x1000;
 
+            // capture the generated module without chaining: the bundled libwabt
+            // (wabt 1.0.6) can't parse return_call_indirect
+            cpu.set_jit_config(7, 0); // JIT64_CHAINING
+            cpu.set_jit_config(10, 0); // JIT32_CHAINING
+
             cpu.mem8.set(executable, START_ADDRESS);
             cpu.update_state_flags();
             cpu.jit_force_generate(START_ADDRESS);

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // APIC self-IPI from compiled 64-bit code: the interrupt has to be delivered on
 // an instruction boundary, not in the middle of the ICR write (see selfipi.asm).
-// Same knobs as run.js: DISABLE_JIT, JIT64_CHAINING=0, V86_WASM_PATH, TEST_RELEASE_BUILD.
+// Same knobs as run.js: DISABLE_JIT, JIT64_CHAINING=0, JIT32_CHAINING=0, V86_WASM_PATH, TEST_RELEASE_BUILD.
 
 import url from "node:url";
 import path from "node:path";
@@ -47,6 +47,13 @@ if(process.env.JIT64_CHAINING === "0")
 {
     emulator.bus.register("emulator-started", () => {
         emulator.v86.cpu.wm.exports["set_jit_config"](7, 0);
+    });
+}
+
+if(process.env.JIT32_CHAINING === "0")
+{
+    emulator.bus.register("emulator-started", () => {
+        emulator.v86.cpu.wm.exports["set_jit_config"](10, 0);
     });
 }
 

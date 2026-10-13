@@ -10,7 +10,7 @@ use crate::modrm::ModrmByte;
 use crate::opstats;
 use crate::profiler;
 use crate::regs;
-use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocal, WasmLocalI64};
+use crate::wasmgen::wasm_builder::{Label, WasmBuilder, WasmLocal, WasmLocalI64};
 
 pub fn gen_add_cs_offset(ctx: &mut JitContext) {
     if !ctx.cpu.has_flat_segmentation() {
@@ -3437,6 +3437,163 @@ pub fn gen_condition_fn(ctx: &mut JitContext, condition: u8) {
             gen_test_jcxz(ctx, ctx.cpu.asize_32());
         }
     }
+}
+
+/// At the (normal) exit of a module for 16/32-bit code: continue directly with the entry point
+/// for the instruction pointer, like cycle_internal would: by branching to reenter_label (which
+/// dispatches on the initial state) if it's in this module, otherwise through a tail call of
+/// the other module that passes the registers. Falls through if there is none, the cpu halted
+/// or the instruction budget of the current do_many_cycles is used up (so that timers and
+/// interrupts are handled). The instruction counter must have been updated.
+///
+/// The 32-bit companion of jit64::gen_chain_to_next_module, with the same guards. The lookup
+/// mirrors cycle_internal's (canonicalize, then tlb_code_get), except that only the flat
+/// tlb_code array is consulted: it covers all pages below 4 GiB, and pages at or above 4 GiB
+/// can only hold modules for 64-bit code. Cycle-exact equivalence for the (unreachable in
+/// practice) case of an instruction pointer >= 4 GiB in 32-bit mode is kept by falling through
+/// to the normal exit, which dispatches through cycle_internal as before.
+pub fn gen_chain_to_next_module32(ctx: &mut JitContext, reenter_label: Label) {
+    use crate::cpu::cpu;
+    use crate::cpu::cpu::{Code, WASM_TABLE_OFFSET};
+    use std::mem::offset_of;
+
+    // !in_hlt && (int)(jit_chain_instruction_limit - instruction_counter) > 0
+    //     && !debug_mode_active()
+    ctx.builder.load_fixed_u8(global_pointers::in_hlt as u32);
+    ctx.builder.eqz_i32();
+    ctx.builder
+        .load_fixed_i32(&raw const cpu::jit_chain_instruction_limit as u32);
+    ctx.builder
+        .load_fixed_i32(global_pointers::instruction_counter as u32);
+    ctx.builder.sub_i32();
+    ctx.builder.const_i32(0);
+    ctx.builder.gt_i32();
+    ctx.builder.and_i32();
+    // Breakpoints and single-stepping are only checked by the interpreter: cycle_internal
+    // doesn't run compiled code while they are armed (see cpu::debug_mode_active), so chaining
+    // must not either. They are armed by instructions run through the interpreter (popf, iret,
+    // mov dr7, ...); blocks containing them end in BasicBlockType::Exit or leave through the
+    // has_sti path, and reach the exit code here.
+    ctx.builder
+        .load_fixed_i32(global_pointers::flags as u32);
+    ctx.builder
+        .const_i32(crate::cpu::cpu::FLAG_TRAP | crate::cpu::cpu::FLAG_RF);
+    ctx.builder.and_i32();
+    ctx.builder
+        .load_fixed_u8(&raw const cpu::debug_bp_armed as u32);
+    ctx.builder.or_i32();
+    ctx.builder.eqz_i32();
+    ctx.builder.and_i32();
+    ctx.builder.if_void();
+    {
+        gen_get_eip64(ctx.builder);
+        // canonicalize_address: bits 63:48 don't take part in the translation
+        ctx.builder.const_i64(0x0000_FFFF_FFFF_FFFF);
+        ctx.builder.and_i64();
+        let eip = ctx.builder.tee_new_local_i64();
+        ctx.builder.const_i64(32);
+        ctx.builder.shr_u_i64();
+        ctx.builder.eqz_i64();
+        ctx.builder.if_void();
+        {
+            // code = tlb_code[(u32)eip >> 12], a pointer to the page's Code or 0
+            ctx.builder.get_local_i64(&eip);
+            ctx.builder.wrap_i64_to_i32();
+            ctx.builder.const_i32(12);
+            ctx.builder.shr_u_i32();
+            ctx.builder.const_i32(2);
+            ctx.builder.shl_i32();
+            ctx.builder
+                .load_aligned_i32(&raw const cpu::tlb_code as u32);
+            let code = ctx.builder.tee_new_local();
+
+            // code != 0 && code.state_flags == *state_flags && !code.state_flags.is_64
+            //
+            // The !is_64 test is not redundant with the equality check: the cpu mode may have
+            // changed to 64-bit *inside* this module (e.g. an iret to a 64-bit segment), in
+            // which case the target entry with matching state flags holds a 64-bit module —
+            // the tail call below uses the jit32 signature and would trap with a signature
+            // mismatch. Without a chain the main loop dispatches it correctly.
+            ctx.builder.if_void();
+            {
+                ctx.builder.get_local(&code);
+                ctx.builder.load_u8(offset_of!(Code, state_flags) as u32);
+                let code_flags = ctx.builder.tee_new_local();
+                ctx.builder
+                    .load_fixed_u8(global_pointers::state_flags as u32);
+                ctx.builder.eq_i32();
+                // code must be a jit32 module (64-bit modules have a different signature)
+                ctx.builder.get_local(&code_flags);
+                ctx.builder.const_i32(1 << 4); // CachedStateFlags is_64 bit
+                ctx.builder.and_i32();
+                ctx.builder.eqz_i32();
+                ctx.builder.and_i32();
+                ctx.builder.free_local(code_flags);
+                ctx.builder.if_void();
+                {
+                    // state = code.state_table[eip & 0xFFF]
+                    ctx.builder.get_local(&code);
+                    ctx.builder.get_local_i64(&eip);
+                    ctx.builder.wrap_i64_to_i32();
+                    ctx.builder.const_i32(0xFFF);
+                    ctx.builder.and_i32();
+                    ctx.builder.const_i32(1);
+                    ctx.builder.shl_i32();
+                    ctx.builder.add_i32();
+                    ctx.builder
+                        .load_aligned_u16(offset_of!(Code, state_table) as u32);
+                    let state = ctx.builder.tee_new_local();
+                    ctx.builder.const_i32(u16::MAX as i32);
+                    ctx.builder.ne_i32();
+                    ctx.builder.if_void();
+                    {
+                        // in this module?
+                        ctx.builder.get_local(&code);
+                        ctx.builder
+                            .load_aligned_u16(offset_of!(Code, wasm_table_index) as u32);
+                        ctx.builder
+                            .const_i32(ctx.wasm_table_index.to_u16() as i32);
+                        ctx.builder.eq_i32();
+                        ctx.builder.if_void();
+                        {
+                            ctx.builder.get_local(&state);
+                            ctx.builder.set_local(
+                                &ctx.builder.arg_local_initial_state.unsafe_clone(),
+                            );
+                            // counted in the instruction counter already
+                            ctx.builder.const_i32(0);
+                            ctx.builder.set_local(&ctx.instruction_counter);
+                            ctx.builder.br(reenter_label);
+                        }
+                        ctx.builder.block_end();
+
+                        gen_profiler_stat_increment(
+                            ctx.builder,
+                            profiler::stat::RUN_FROM_CACHE,
+                        );
+                        ctx.builder.get_local(&state);
+                        for i in 0..8 {
+                            ctx.builder.get_local(&ctx.register_locals[i]);
+                        }
+                        ctx.builder.get_local(&code);
+                        ctx.builder
+                            .load_aligned_u16(offset_of!(Code, wasm_table_index) as u32);
+                        ctx.builder.const_i32(WASM_TABLE_OFFSET as i32);
+                        ctx.builder.add_i32();
+                        ctx.builder.return_call_indirect_jit32();
+                    }
+                    ctx.builder.block_end();
+                    ctx.builder.free_local(state);
+                }
+                ctx.builder.block_end();
+            }
+            ctx.builder.block_end();
+            ctx.builder.free_local(code);
+        }
+        ctx.builder.block_end();
+        ctx.builder.free_local_i64(eip);
+    }
+    ctx.builder.block_end();
 }
 
 pub fn gen_move_registers_from_locals_to_memory(ctx: &mut JitContext) {

@@ -72,6 +72,8 @@ enum FunctionType {
 
     // the function of a module for 64-bit code: initial state and the 16 registers
     FN_JIT64,
+    // the function of a module for 16/32-bit code: initial state and the 8 registers
+    FN_JIT32,
     // When adding at the end, update LAST below
 }
 
@@ -81,10 +83,12 @@ impl FunctionType {
         unsafe { transmute(x) }
     }
     pub fn to_u8(self: FunctionType) -> u8 { self as u8 }
-    pub const LAST: FunctionType = FunctionType::FN_JIT64;
+    pub const LAST: FunctionType = FunctionType::FN_JIT32;
 }
 
 pub const WASM_MODULE_ARGUMENT_COUNT: u8 = 1;
+/// Parameters of a module for 16/32-bit code: the initial state and the 8 registers
+pub const WASM_MODULE_ARGUMENT_COUNT_JIT32: u8 = 9;
 /// Parameters of a module for 64-bit code: the initial state and the 16 registers
 pub const WASM_MODULE_ARGUMENT_COUNT_JIT64: u8 = 17;
 
@@ -313,6 +317,9 @@ impl WasmBuilder {
                     ],
                     &[],
                 )),
+                FunctionType::FN_JIT32 => {
+                    Some((&[I32, I32, I32, I32, I32, I32, I32, I32, I32], &[]))
+                },
                 _ => None,
             };
             if let Some((params, results)) = generic {
@@ -625,6 +632,30 @@ impl WasmBuilder {
         self.instruction_body.push(0); // table index
     }
 
+    /// Generate the function of a module for 16/32-bit code (type FN_JIT32): the registers are
+    /// passed as parameters 1 to 8. If import_function_table is set, the module can tail-call
+    /// other modules (return_call_indirect_jit32). Call after reset.
+    pub fn set_jit32_function(&mut self, import_function_table: bool) {
+        dbg_assert!(self.local_count == 0);
+        self.arg_count = WASM_MODULE_ARGUMENT_COUNT_JIT32;
+        self.import_function_table = import_function_table;
+    }
+
+    /// The parameter holding register r of a module for 16/32-bit code
+    pub fn arg_local_reg32(&self, r: u32) -> WasmLocal {
+        dbg_assert!(self.arg_count == WASM_MODULE_ARGUMENT_COUNT_JIT32 && r < 8);
+        WasmLocal(1 + r as u8)
+    }
+
+    /// Tail call of the module function in the table at the index on top of the stack, with
+    /// the arguments below it (the initial state and the 8 registers)
+    pub fn return_call_indirect_jit32(&mut self) {
+        dbg_assert!(self.import_function_table);
+        self.instruction_body.push(op::OP_RETURNCALLINDIRECT);
+        self.instruction_body.push(FunctionType::FN_JIT32.to_u8());
+        self.instruction_body.push(0); // table index
+    }
+
     fn write_import_entry(&mut self, fn_name: &str, type_index: FunctionType) -> u16 {
         self.output.push(1); // length of module name
         self.output.push('e' as u8); // module name
@@ -649,6 +680,9 @@ impl WasmBuilder {
         self.output
             .push(if self.arg_count == WASM_MODULE_ARGUMENT_COUNT_JIT64 {
                 FunctionType::FN_JIT64.to_u8()
+            }
+            else if self.arg_count == WASM_MODULE_ARGUMENT_COUNT_JIT32 {
+                FunctionType::FN_JIT32.to_u8()
             }
             else {
                 FunctionType::FN1.to_u8()
