@@ -469,13 +469,13 @@ pub fn gen_readable_or_pagefault(ctx: &mut JitContext, address_local: &WasmLocal
         .const_i32(ctx.start_of_current_instruction as i32 & 0xFFF);
     ctx.builder.call_fn3_ret("readable_or_pagefault_jit");
     if cfg!(feature = "profiler") {
-        ctx.builder.if_void();
+        ctx.builder.if_void_unlikely();
         gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction);
         ctx.builder.br(ctx.exit_with_fault_label);
         ctx.builder.block_end();
     }
     else {
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
     }
 }
 
@@ -489,13 +489,13 @@ pub fn gen_writable_or_pagefault(ctx: &mut JitContext, address_local: &WasmLocal
     );
     ctx.builder.call_fn3_ret("writable_or_pagefault_jit");
     if cfg!(feature = "profiler") {
-        ctx.builder.if_void();
+        ctx.builder.if_void_unlikely();
         gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction);
         ctx.builder.br(ctx.exit_with_fault_label);
         ctx.builder.block_end();
     }
     else {
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
     }
 }
 
@@ -780,7 +780,7 @@ fn gen_safe_read(
             ctx.builder.and_i32();
         }
 
-        ctx.builder.br_if(cont);
+        ctx.builder.br_if_likely(cont);
 
         if cfg!(feature = "profiler") {
             ctx.builder.get_local(&address_local);
@@ -813,7 +813,7 @@ fn gen_safe_read(
         ctx.builder.and_i32();
 
         if cfg!(feature = "profiler") {
-            ctx.builder.if_void();
+            ctx.builder.if_void_unlikely();
             gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction);
             ctx.builder.block_end();
 
@@ -822,7 +822,7 @@ fn gen_safe_read(
             ctx.builder.and_i32();
         }
 
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
 
         ctx.builder.block_end();
 
@@ -916,7 +916,7 @@ pub fn gen_get_phys_eip_plus_mem(ctx: &mut JitContext, address_local: &WasmLocal
         ctx.builder.const_i32(TLB_VALID as i32);
         ctx.builder.eq_i32();
 
-        ctx.builder.br_if(cont);
+        ctx.builder.br_if_likely(cont);
 
         if cfg!(feature = "profiler") {
             ctx.builder.get_local(&address_local);
@@ -932,7 +932,7 @@ pub fn gen_get_phys_eip_plus_mem(ctx: &mut JitContext, address_local: &WasmLocal
         ctx.builder.and_i32();
 
         if cfg!(feature = "profiler") {
-            ctx.builder.if_void();
+            ctx.builder.if_void_unlikely();
             gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction); // XXX
             ctx.builder.block_end();
 
@@ -941,7 +941,7 @@ pub fn gen_get_phys_eip_plus_mem(ctx: &mut JitContext, address_local: &WasmLocal
             ctx.builder.and_i32();
         }
 
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
 
         ctx.builder.block_end();
 
@@ -1013,7 +1013,7 @@ fn gen_safe_write(
             ctx.builder.and_i32();
         }
 
-        ctx.builder.br_if(cont);
+        ctx.builder.br_if_likely(cont);
 
         if cfg!(feature = "profiler") {
             ctx.builder.get_local(&address_local);
@@ -1061,7 +1061,7 @@ fn gen_safe_write(
         ctx.builder.and_i32();
 
         if cfg!(feature = "profiler") {
-            ctx.builder.if_void();
+            ctx.builder.if_void_unlikely();
             gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction);
             ctx.builder.block_end();
 
@@ -1070,7 +1070,7 @@ fn gen_safe_write(
             ctx.builder.and_i32();
         }
 
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
 
         ctx.builder.block_end();
 
@@ -1179,7 +1179,7 @@ pub fn gen_safe_read_write(
 
         let can_use_fast_path_local = ctx.builder.tee_new_local();
 
-        ctx.builder.br_if(cont);
+        ctx.builder.br_if_likely(cont);
 
         if cfg!(feature = "profiler") {
             ctx.builder.get_local(&address_local);
@@ -1217,7 +1217,7 @@ pub fn gen_safe_read_write(
         ctx.builder.and_i32();
 
         if cfg!(feature = "profiler") {
-            ctx.builder.if_void();
+            ctx.builder.if_void_unlikely();
             gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction);
             ctx.builder.block_end();
 
@@ -1226,7 +1226,7 @@ pub fn gen_safe_read_write(
             ctx.builder.and_i32();
         }
 
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
 
         ctx.builder.block_end();
 
@@ -1441,7 +1441,7 @@ fn gen_safe_read_mem64(
         ctx.builder.and_i32();
     }
 
-    ctx.builder.br_if(cont);
+    ctx.builder.br_if_likely(cont);
 
     if cfg!(feature = "profiler") {
         ctx.builder.get_local(&address_local);
@@ -1475,7 +1475,7 @@ fn gen_safe_read_mem64(
     ctx.builder.and_i32();
 
     if cfg!(feature = "profiler") {
-        ctx.builder.if_void();
+        ctx.builder.if_void_unlikely();
         gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction);
         ctx.builder.block_end();
 
@@ -1484,7 +1484,7 @@ fn gen_safe_read_mem64(
         ctx.builder.and_i32();
     }
 
-    ctx.builder.br_if(ctx.exit_with_fault_label);
+    ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
 
     // slow path only: the fast path branched to cont with the tlb entry already in entry_local
     gen_load_slow_entry(ctx);
@@ -1568,7 +1568,7 @@ fn gen_get_phys_eip_plus_mem_mem64(ctx: &mut JitContext, address_local: &WasmLoc
     ctx.builder.const_i32(TLB_VALID as i32);
     ctx.builder.eq_i32();
 
-    ctx.builder.br_if(cont);
+    ctx.builder.br_if_likely(cont);
 
     if cfg!(feature = "profiler") {
         ctx.builder.get_local(&address_local);
@@ -1585,7 +1585,7 @@ fn gen_get_phys_eip_plus_mem_mem64(ctx: &mut JitContext, address_local: &WasmLoc
     ctx.builder.and_i32();
 
     if cfg!(feature = "profiler") {
-        ctx.builder.if_void();
+        ctx.builder.if_void_unlikely();
         gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction); // XXX
         ctx.builder.block_end();
 
@@ -1594,7 +1594,7 @@ fn gen_get_phys_eip_plus_mem_mem64(ctx: &mut JitContext, address_local: &WasmLoc
         ctx.builder.and_i32();
     }
 
-    ctx.builder.br_if(ctx.exit_with_fault_label);
+    ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
 
     // slow path only: the fast path branched to cont with the tlb entry already in entry_local
     gen_load_slow_entry(ctx);
@@ -1662,7 +1662,7 @@ fn gen_safe_write_mem64(
         ctx.builder.and_i32();
     }
 
-    ctx.builder.br_if(cont);
+    ctx.builder.br_if_likely(cont);
 
     if cfg!(feature = "profiler") {
         ctx.builder.get_local(&address_local);
@@ -1711,7 +1711,7 @@ fn gen_safe_write_mem64(
     ctx.builder.and_i32();
 
     if cfg!(feature = "profiler") {
-        ctx.builder.if_void();
+        ctx.builder.if_void_unlikely();
         gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction);
         ctx.builder.block_end();
 
@@ -1720,7 +1720,7 @@ fn gen_safe_write_mem64(
         ctx.builder.and_i32();
     }
 
-    ctx.builder.br_if(ctx.exit_with_fault_label);
+    ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
 
     // slow path only: the fast path branched to cont with the tlb entry already in entry_local
     gen_load_slow_entry(ctx);
@@ -1824,7 +1824,7 @@ fn gen_safe_read_write_mem64(
 
     let can_use_fast_path_local = ctx.builder.tee_new_local();
 
-    ctx.builder.br_if(cont);
+    ctx.builder.br_if_likely(cont);
 
     if cfg!(feature = "profiler") {
         ctx.builder.get_local(&address_local);
@@ -1863,7 +1863,7 @@ fn gen_safe_read_write_mem64(
     ctx.builder.and_i32();
 
     if cfg!(feature = "profiler") {
-        ctx.builder.if_void();
+        ctx.builder.if_void_unlikely();
         gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction);
         ctx.builder.block_end();
 
@@ -1872,7 +1872,7 @@ fn gen_safe_read_write_mem64(
         ctx.builder.and_i32();
     }
 
-    ctx.builder.br_if(ctx.exit_with_fault_label);
+    ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
 
     // slow path only: the fast path branched to cont with the tlb entry already in entry_local
     gen_load_slow_entry(ctx);
