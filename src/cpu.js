@@ -352,6 +352,8 @@ CPU.prototype.write_blob = function(blob, offset)
 
     if(blob.length)
     {
+        this.check_mem_views();
+
         dbg_assert(!this.in_mapped_range_phys64(offset));
         dbg_assert(!this.in_mapped_range_phys64(offset + blob.length - 1));
 
@@ -366,6 +368,8 @@ CPU.prototype.write_blob = function(blob, offset)
  */
 CPU.prototype.read_blob = function(offset, length)
 {
+    this.check_mem_views();
+
     if(length)
     {
         dbg_assert(!this.in_mapped_range_phys64(offset));
@@ -405,7 +409,7 @@ CPU.prototype.create_jit_imports = function()
         jit_imports[name] = this.wm.exports[name];
     }
 
-    // modules for 64-bit code continue with the next module through a tail call
+    // compiled modules continue with the next module through a tail call
     // (return_call_indirect) on the table, if the host supports tail calls
     dbg_assert(!("t" in jit_imports));
     jit_imports["t"] = this.wm.wasm_table;
@@ -418,7 +422,8 @@ CPU.prototype.create_jit_imports = function()
     ]);
     if(WebAssembly.validate(TAIL_CALL_TEST_MODULE))
     {
-        this.wm.exports["set_jit_config"](7, 1);
+        this.wm.exports["set_jit_config"](7, 1); // JIT64_CHAINING
+        this.wm.exports["set_jit_config"](10, 1); // JIT32_CHAINING
     }
 
     this.jit_imports = jit_imports;
@@ -1004,6 +1009,8 @@ CPU.prototype.set_state_ioapic = function(state)
 
 CPU.prototype.pack_memory = function()
 {
+    this.check_mem_views();
+
     dbg_assert((this.mem8.length & 0xFFF) === 0);
 
     const page_count = this.mem8.length / 0x1000;
@@ -1033,6 +1040,8 @@ CPU.prototype.pack_memory = function()
 
 CPU.prototype.unpack_memory = function(bitmap, packed_memory)
 {
+    this.check_mem_views();
+
     this.zero_memory(0, this.memory_size[0]);
 
     const page_count = this.memory_size[0] / 0x1000;
@@ -1092,6 +1101,41 @@ CPU.prototype.reset_memory = function()
     this.mem8.fill(0);
 };
 
+/**
+ * Create fresh mem8/mem32s views over guest RAM and remember the layout, so
+ * that check_mem_views() can recreate them after the underlying wasm memory
+ * has been grown elsewhere (growing a WebAssembly memory — e.g. the svga
+ * buffer allocation or the zstd context — silently detaches all previously
+ * created views over its buffer: their byteLength becomes 0 and reads and
+ * writes through them are silently lost)
+ *
+ * @param {WebAssembly.Memory} memory
+ * @param {number} offset
+ * @param {number} size
+ */
+CPU.prototype.update_mem_views = function(memory, offset, size)
+{
+    this.mem_views_memory = memory;
+    this.mem_views_offset = offset;
+    this.mem_views_size = size;
+
+    this.mem8 = view(Uint8Array, memory, offset, size);
+    this.mem32s = view(Uint32Array, memory, offset, size / 4);
+};
+
+/**
+ * Recreate the mem8/mem32s views if growth of the underlying wasm memory
+ * has detached them (see update_mem_views). Cheap: one comparison when the
+ * views are intact
+ */
+CPU.prototype.check_mem_views = function()
+{
+    if(this.mem8.length === 0 && this.mem_views_memory !== undefined && this.mem_views_memory.buffer.byteLength !== 0)
+    {
+        this.update_mem_views(this.mem_views_memory, this.mem_views_offset, this.mem_views_size);
+    }
+};
+
 CPU.prototype.create_memory = function(size, minimum_size)
 {
     if(size < minimum_size)
@@ -1143,13 +1187,11 @@ CPU.prototype.create_memory = function(size, minimum_size)
             if(!(e instanceof TypeError)) throw e;
             this.guest_memory.grow(pages);
         }
-        this.mem8 = view(Uint8Array, this.guest_memory, 0, size);
-        this.mem32s = view(Uint32Array, this.guest_memory, 0, size / 4);
+        this.update_mem_views(this.guest_memory, 0, size);
     }
     else
     {
-        this.mem8 = view(Uint8Array, this.wasm_memory, memory_offset, size);
-        this.mem32s = view(Uint32Array, this.wasm_memory, memory_offset, size / 4);
+        this.update_mem_views(this.wasm_memory, memory_offset, size);
     }
 };
 

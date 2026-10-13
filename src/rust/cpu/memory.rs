@@ -128,6 +128,13 @@ pub fn allocate_memory(size: u32) -> u32 {
     unsafe {
         mem8 = ptr;
     };
+    unsafe {
+        // flat per-physical-page JIT hotness/entry-point bookkeeping: cover the low 4 GiB
+        // (which includes executable mmio aliases like the BIOS at 0xFFFFF) plus the high RAM
+        jit::init_page_state_coverage(
+            (HIGH_MEMORY_START >> 12) as u32 + (*high_memory_size >> 12) as u32,
+        );
+    }
     ptr as u32
 }
 
@@ -162,6 +169,7 @@ pub fn svga_allocate_memory(size: u32) -> u32 {
 }
 
 /// Whether accesses to the physical address go through mmio (or hit nothing) instead of RAM
+#[inline]
 pub fn in_mapped_range(addr: u64) -> bool {
     if addr < unsafe { *memory_size } as u64 {
         addr >= 0xA0000 && addr < 0xC0000
@@ -220,6 +228,7 @@ pub fn read8(addr: u64) -> i32 {
 }
 #[export_name = "read8"]
 pub fn read8_js(addr: u32) -> i32 { read8(addr as u64) }
+#[inline]
 pub fn read8_no_mmap_check(addr: u64) -> i32 { guest::load8(phys_to_host(addr)) as i32 }
 
 pub fn read16(addr: u64) -> i32 {
@@ -239,6 +248,7 @@ pub fn read16(addr: u64) -> i32 {
 pub fn read16_js(addr: u32) -> i32 { read16(addr as u64) }
 #[export_name = "read16_phys64"]
 pub fn read16_phys64_js(addr: f64) -> i32 { read16(addr as u64) }
+#[inline]
 pub fn read16_no_mmap_check(addr: u64) -> i32 { guest::load16(phys_to_host(addr)) as i32 }
 
 pub fn read32s(addr: u64) -> i32 {
@@ -267,6 +277,7 @@ pub fn read32s(addr: u64) -> i32 {
 pub fn read32s_js(addr: u32) -> i32 { read32s(addr as u64) }
 #[export_name = "read32s_phys64"]
 pub fn read32s_phys64_js(addr: f64) -> i32 { read32s(addr as u64) }
+#[inline]
 pub fn read32_no_mmap_check(addr: u64) -> i32 { guest::load32(phys_to_host(addr)) as i32 }
 
 pub unsafe fn read64s(addr: u64) -> i64 {
@@ -316,6 +327,7 @@ pub unsafe fn write8(addr: u64, value: i32) {
 #[export_name = "write8"]
 pub unsafe fn write8_js(addr: u32, value: i32) { write8(addr as u64, value) }
 
+#[inline]
 pub unsafe fn write8_no_mmap_or_dirty_check(addr: u64, value: i32) {
     guest::store8(phys_to_host(addr), value as u8)
 }
@@ -333,6 +345,7 @@ pub unsafe fn write16(addr: u64, value: i32) {
 pub unsafe fn write16_js(addr: u32, value: i32) { write16(addr as u64, value) }
 #[export_name = "write16_phys64"]
 pub unsafe fn write16_phys64_js(addr: f64, value: i32) { write16(addr as u64, value) }
+#[inline]
 pub unsafe fn write16_no_mmap_or_dirty_check(addr: u64, value: i32) {
     guest::store16(phys_to_host(addr), value as u16)
 }
@@ -351,14 +364,17 @@ pub unsafe fn write32_js(addr: u32, value: i32) { write32(addr as u64, value) }
 #[export_name = "write32_phys64"]
 pub unsafe fn write32_phys64_js(addr: f64, value: i32) { write32(addr as u64, value) }
 
+#[inline]
 pub unsafe fn write32_no_mmap_or_dirty_check(addr: u64, value: i32) {
     guest::store32(phys_to_host(addr), value as u32)
 }
 
+#[inline]
 pub unsafe fn write64_no_mmap_or_dirty_check(addr: u64, value: u64) {
     guest::store64(phys_to_host(addr), value)
 }
 
+#[inline]
 pub unsafe fn write128_no_mmap_or_dirty_check(addr: u64, value: reg128) {
     guest::store128(phys_to_host(addr), value)
 }

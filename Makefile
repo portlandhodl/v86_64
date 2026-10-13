@@ -24,10 +24,17 @@ endif
 # Optimize the release wasm with binaryen's wasm-opt if it's installed (`make WASM_OPT=false` to skip)
 WASM_OPT ?= $(if $(shell command -v wasm-opt),true,false)
 WASM_OPT_FEATURES=--enable-bulk-memory --enable-multivalue --enable-simd --enable-sign-ext \
-	--enable-mutable-globals --enable-nontrapping-float-to-int
+	--enable-mutable-globals --enable-nontrapping-float-to-int --enable-extended-const
+# Features safe for the fallback wasm, which must stay loadable by old browsers
+# (rustc's default feature set; notably no simd/bulk-memory/multivalue)
+WASM_OPT_FEATURES_SAFE=--enable-sign-ext --enable-mutable-globals --enable-nontrapping-float-to-int
+
+# Pre-compress the release wasm for servers supporting Content-Encoding: gzip (`make GZIP=false` to skip)
+GZIP ?= $(if $(shell command -v gzip),true,false)
+WASM_GZ=build/v86.wasm.gz build/v86-mem64.wasm.gz build/v86-fallback.wasm.gz
 
 default: build/v86-debug.wasm
-all: build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm build/v86-mem64.wasm
+all: build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm build/v86-mem64.wasm $(WASM_GZ)
 all-debug: build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm
 browser: build/v86_all.js
 
@@ -83,7 +90,7 @@ CARGO_FLAGS_SAFE=\
 		-C link-args="build/zstddeclib.o" \
 		--verbose
 
-CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128
+CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128 -C target-feature=+extended-const
 
 CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
@@ -239,6 +246,7 @@ build/v86.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	cargo rustc --release $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/release/v86_64.wasm build/v86.wasm
 	if $(WASM_OPT); then wasm-opt -O3 $(WASM_OPT_FEATURES) --strip-debug build/v86.wasm -o build/v86.wasm; fi
+	if ! $(WASM_OPT); then echo "warning: WASM_OPT=false: build/v86.wasm is not optimized and keeps DWARF debug info" >&2; fi
 	BLOCK_SIZE=K ls -l build/v86.wasm
 
 build/v86-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
@@ -270,6 +278,11 @@ build/v86-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Carg
 	mkdir -p build/
 	cargo rustc --release $(CARGO_FLAGS_SAFE)
 	cp build/wasm32-unknown-unknown/release/v86_64.wasm build/v86-fallback.wasm || true
+	if $(WASM_OPT); then wasm-opt -O3 $(WASM_OPT_FEATURES_SAFE) --strip-debug build/v86-fallback.wasm -o build/v86-fallback.wasm; fi
+
+$(WASM_GZ): %.gz: %
+	mkdir -p build/
+	if $(GZIP); then gzip -9 -f -k $<; fi
 
 debug-with-profiler: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
@@ -308,6 +321,7 @@ clean:
 	-rm build/v86_all.js
 	-rm build/v86.wasm
 	-rm build/v86-debug.wasm
+	-rm build/*.gz
 	-rm $(INSTRUCTION_TABLES)
 	-rm build/*.map
 	-rm build/*.wast
@@ -390,6 +404,7 @@ longmode-tests: build/v86-debug.wasm
 	./tests/longmode/run.js
 	JIT_THRESHOLD=1 ./tests/longmode/run.js
 	JIT_THRESHOLD=1 JIT64_CHAINING=0 ./tests/longmode/run.js
+	JIT_THRESHOLD=1 JIT32_CHAINING=0 ./tests/longmode/run.js
 	./tests/longmode/multiboot64.js
 	./tests/longmode/selfipi.js
 	JIT64_CHAINING=0 ./tests/longmode/selfipi.js

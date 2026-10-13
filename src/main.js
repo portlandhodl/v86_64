@@ -19,6 +19,7 @@ export function v86(bus, wasm)
 
     this.tick_counter = 0;
     this.worker = null;
+    this.channel = null;
 
     /** @type {CPU} */
     this.cpu = new CPU(bus, wasm, () => { this.idle && this.next_tick(0); });
@@ -123,6 +124,41 @@ else if(globalThis["scheduler"] && typeof globalThis["scheduler"]["postTask"] ==
 
     v86.prototype.register_yield = function() {};
     v86.prototype.unregister_yield = function() {};
+}
+else if(typeof MessageChannel !== "undefined")
+{
+    // MessageChannel-based macrotask scheduling for the zero-delay case:
+    // unlike setTimeout(0), posted messages are not clamped, and they avoid
+    // the Worker round-trip of the fallback below
+    /* global MessageChannel */
+
+    v86.prototype.register_yield = function()
+    {
+        this.channel = new MessageChannel();
+        this.channel.port1.onmessage = e => this.yield_callback(e.data);
+    };
+
+    v86.prototype.yield = function(t, tick)
+    {
+        if(t < 1)
+        {
+            this.channel.port2.postMessage(tick);
+        }
+        else
+        {
+            setTimeout(tick => this.yield_callback(tick), t, tick);
+        }
+    };
+
+    v86.prototype.unregister_yield = function()
+    {
+        if(this.channel)
+        {
+            this.channel.port1.close();
+            this.channel.port2.close();
+            this.channel = null;
+        }
+    };
 }
 else if(typeof Worker !== "undefined")
 {

@@ -6,6 +6,8 @@ import { dbg_log } from "./log.js";
 import { CPU } from "./cpu.js";
 import { BusConnector } from "./bus.js";
 
+/* global queueMicrotask */
+
 /*
  * Serial ports
  * http://wiki.osdev.org/UART
@@ -45,6 +47,11 @@ const UART_MSR_DDCD = 0x3; // Delta DCD
 const UART_MSR_TERI = 0x2; // Trailing Edge RI
 const UART_MSR_DDSR = 0x1; // Delta DSR
 const UART_MSR_DCTS = 0x0; // Delta CTS
+
+// Host-side output batching: pending bytes are delivered as one
+// "serial{N}-output-bytes" event, synchronously once this many bytes have
+// accumulated and otherwise on a microtask (see write_data/flush_output)
+const UART_OUTPUT_BATCH_SIZE = 4096;
 
 
 /**
@@ -86,6 +93,10 @@ export function UART(cpu, port, bus)
     this.irq = 0;
 
     this.input = [];
+
+    // host-side output batch buffer (never guest-visible, see write_data)
+    this.output = [];
+    this.output_flush_scheduled = false;
 
     this.current_line = "";
 
@@ -405,7 +416,36 @@ UART.prototype.write_data = function(out_byte)
     if(this.modem_control & UART_MCR_LOOPBACK) {
         this.data_received(out_byte);
     } else {
-        this.bus.send("serial" + this.com + "-output-byte", out_byte);
+        const byte_event = "serial" + this.com + "-output-byte";
+        const bytes_event = "serial" + this.com + "-output-bytes";
+
+        // per-byte event, synchronously and in write order, but only when
+        // someone is listening (tests do; the in-browser adapters use the
+        // batched event below)
+        if(this.bus.has_listeners(byte_event))
+        {
+            this.bus.send(byte_event, out_byte);
+        }
+
+        // batched event: accumulate and flush once per microtask
+        if(this.bus.has_listeners(bytes_event))
+        {
+            this.output.push(out_byte);
+
+            if(this.output.length >= UART_OUTPUT_BATCH_SIZE)
+            {
+                this.flush_output();
+            }
+            else if(!this.output_flush_scheduled)
+            {
+                this.output_flush_scheduled = true;
+                queueMicrotask(() =>
+                {
+                    this.output_flush_scheduled = false;
+                    this.flush_output();
+                });
+            }
+        }
     }
 
     if(DEBUG)
@@ -419,6 +459,30 @@ UART.prototype.write_data = function(out_byte)
             dbg_log("SERIAL: " + line);
             this.current_line = "";
         }
+    }
+};
+
+/**
+ * Emit the bytes accumulated in this.output as "serial{N}-output-bytes"
+ * chunk event(s), clearing the buffer
+ */
+UART.prototype.flush_output = function()
+{
+    const output = this.output;
+    const length = output.length;
+
+    if(length === 0)
+    {
+        return;
+    }
+
+    this.output = [];
+
+    const bytes_event = "serial" + this.com + "-output-bytes";
+
+    for(let i = 0; i < length; i += UART_OUTPUT_BATCH_SIZE)
+    {
+        this.bus.send(bytes_event, Uint8Array.from(output.slice(i, i + UART_OUTPUT_BATCH_SIZE)));
     }
 };
 

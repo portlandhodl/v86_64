@@ -77,11 +77,34 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    const type = TYPES[path.extname(file)] || "application/octet-stream";
+
+    // serve the pre-compressed <file>.gz sibling of .wasm/.js files when the
+    // client accepts gzip (full-file responses only: ranges need plain bytes)
+    let gzipped = false;
+    if(!req.headers.range &&
+        (file.endsWith(".wasm") || file.endsWith(".js")) &&
+        /\bgzip\b/.test(req.headers["accept-encoding"] || ""))
+    {
+        try
+        {
+            stat = fs.statSync(file + ".gz");
+            file += ".gz";
+            gzipped = true;
+        }
+        catch(e) {}
+    }
+
     const headers = {
-        "Content-Type": TYPES[path.extname(file)] || "application/octet-stream",
+        "Content-Type": type,
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-cache",
     };
+
+    if(gzipped)
+    {
+        headers["Content-Encoding"] = "gzip";
+    }
 
     let start = 0;
     let end = stat.size - 1;

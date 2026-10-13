@@ -167,7 +167,8 @@ pub fn gen_sse_task_switch_check(ctx: &mut JitContext) {
     ctx.builder
         .const_i32((crate::regs::CR0_EM | crate::regs::CR0_TS) as i32);
     ctx.builder.and_i32();
-    ctx.builder.if_void();
+    // raises #NM: a cold exception exit from the module
+    ctx.builder.if_void_unlikely();
     {
         gen_commit_deferred_flags_cold(ctx);
         codegen::gen_debug_track_jit_exit(ctx.builder, ctx.start_of_current_instruction);
@@ -196,7 +197,7 @@ pub fn gen_cli(ctx: &mut JitContext) {
     ctx.builder.load_fixed_u8(global_pointers::cpl as u32);
     ctx.builder.ge_i32();
 
-    ctx.builder.if_void();
+    ctx.builder.if_void_likely();
     {
         ctx.builder.const_i32(global_pointers::flags as i32);
         ctx.builder.load_fixed_i32(global_pointers::flags as u32);
@@ -818,7 +819,9 @@ fn gen_spill_dirty_registers(ctx: &mut JitContext) {
 /// any of them (the exit path spills the locals). Otherwise reload the registers in `written`.
 fn gen_reload_registers_and_exit_if(ctx: &mut JitContext, written: u16) {
     dbg_assert!(ctx.dirty_registers64 == 0);
-    ctx.builder.if_void();
+    // the wrapper only returns non-zero when it raised an exception or the cpu halted:
+    // both leave the compiled code
+    ctx.builder.if_void_unlikely();
     codegen::gen_move_registers_from_memory_to_locals(ctx);
     ctx.builder.br(ctx.exit_label);
     ctx.builder.block_end();
@@ -1751,7 +1754,7 @@ fn gen_condition_inline(ctx: &mut JitContext, cc: u8) -> bool {
 
 /// Set up the cpu state for running an instruction's interpreter handler from compiled code:
 /// ips packs the instruction's start (bits 0-11) and end (bits 12-23) within the current page
-#[inline(never)]
+#[inline]
 pub unsafe fn jit64_enter(ips: i32, prefixes: i32) {
     let page = *global_pointers::instruction_pointer & !0xFFF;
     *global_pointers::previous_ip = page | (ips & 0xFFF) as u64;
@@ -1764,7 +1767,7 @@ pub unsafe fn jit64_enter(ips: i32, prefixes: i32) {
     }
 }
 
-#[inline(never)]
+#[inline]
 pub unsafe fn jit64_leave() -> i32 {
     *global_pointers::prefixes = 0;
     #[cfg(debug_assertions)]
@@ -1864,7 +1867,10 @@ pub fn gen_chain_to_next_module(ctx: &mut JitContext, reenter_label: Label) {
     ctx.builder.or_i32();
     ctx.builder.eqz_i32();
     ctx.builder.and_i32();
-    ctx.builder.if_void();
+    // the steady state of a busy guest: chain into the next module (or reenter this
+    // one) instead of falling back to the interpreter loop, which only happens when
+    // the instruction budget is used up, halted or a debug trap is armed
+    ctx.builder.if_void_likely();
     {
         codegen::gen_get_eip64(ctx.builder);
         let eip = ctx.builder.set_new_local_i64();
@@ -1962,7 +1968,9 @@ pub fn gen_chain_to_next_module(ctx: &mut JitContext, reenter_label: Label) {
                 let state = ctx.builder.tee_new_local();
                 ctx.builder.const_i32(u16::MAX as i32);
                 ctx.builder.ne_i32();
-                ctx.builder.if_void();
+                // the target module almost always has an entry for the target address
+                // (u16::MAX marks "not present"; the interpreter trains the table)
+                ctx.builder.if_void_likely();
                 {
                     // in this module?
                     ctx.builder.get_local(&code);
@@ -2408,7 +2416,7 @@ pub fn gen_safe_read(ctx: &mut JitContext, bits: u32, address: &WasmLocalI64) {
     let pointer = cache.as_ref().map(|_| new_pointer_local(ctx));
     if let Some(c) = &cache {
         gen_tlb_cache_hit_condition(ctx, bits, address, false);
-        ctx.builder.if_void();
+        ctx.builder.if_void_likely();
         gen_pointer_from_entry(ctx, address, &cached_entry_val(c));
         set_pointer_local(ctx, pointer.as_ref().unwrap());
         ctx.builder.br(done.unwrap());
@@ -2417,7 +2425,7 @@ pub fn gen_safe_read(ctx: &mut JitContext, bits: u32, address: &WasmLocalI64) {
     let cont = ctx.builder.block_void();
     let fastpop = cache.as_ref().map(|_| ctx.builder.block_void());
     let entry = gen_tlb_fast_path_check(ctx, bits, address, false);
-    ctx.builder.br_if(fastpop.unwrap_or(cont));
+    ctx.builder.br_if_likely(fastpop.unwrap_or(cont));
 
     // the slow path may deliver a page fault, which reads the flags: commit the deferred
     // lazy flags of the previous instructions (this instruction hasn't run yet)
@@ -2435,7 +2443,7 @@ pub fn gen_safe_read(ctx: &mut JitContext, bits: u32, address: &WasmLocalI64) {
     if cfg!(feature = "mem64") {
         ctx.builder.const_i32(1);
         ctx.builder.and_i32();
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
         codegen::gen_load_slow_entry(ctx);
         ctx.builder.set_local_i64(match &entry {
             Val::I64(l) => l,
@@ -2449,7 +2457,7 @@ pub fn gen_safe_read(ctx: &mut JitContext, bits: u32, address: &WasmLocalI64) {
         });
         ctx.builder.const_i32(1);
         ctx.builder.and_i32();
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
     }
     if fastpop.is_some() {
         // the slow path's entry may point into mapped memory or scratch: only the fast
@@ -2481,7 +2489,7 @@ pub fn gen_safe_write(ctx: &mut JitContext, bits: u32, address: &WasmLocalI64, v
     let pointer = cache.as_ref().map(|_| new_pointer_local(ctx));
     if let Some(c) = &cache {
         gen_tlb_cache_hit_condition(ctx, bits, address, true);
-        ctx.builder.if_void();
+        ctx.builder.if_void_likely();
         gen_pointer_from_entry(ctx, address, &cached_entry_val(c));
         set_pointer_local(ctx, pointer.as_ref().unwrap());
         ctx.builder.br(done.unwrap());
@@ -2490,14 +2498,14 @@ pub fn gen_safe_write(ctx: &mut JitContext, bits: u32, address: &WasmLocalI64, v
     let cont = ctx.builder.block_void();
     let fastpop = cache.as_ref().map(|_| ctx.builder.block_void());
     let entry = gen_tlb_fast_path_check(ctx, bits, address, true);
-    ctx.builder.br_if(fastpop.unwrap_or(cont));
+    ctx.builder.br_if_likely(fastpop.unwrap_or(cont));
 
     gen_write_slow_path(ctx, bits, address, value);
     // default: the return value is the entry; mem64: it's a status and the entry is stashed
     if cfg!(feature = "mem64") {
         ctx.builder.const_i32(1);
         ctx.builder.and_i32();
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
         codegen::gen_load_slow_entry(ctx);
         ctx.builder.set_local_i64(match &entry {
             Val::I64(l) => l,
@@ -2511,7 +2519,7 @@ pub fn gen_safe_write(ctx: &mut JitContext, bits: u32, address: &WasmLocalI64, v
         });
         ctx.builder.const_i32(1);
         ctx.builder.and_i32();
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
     }
     if fastpop.is_some() {
         // the slow path's entry may point into mapped memory or scratch: only the fast
@@ -2572,7 +2580,7 @@ pub fn gen_safe_read_write(
     let hit_pointer = cache.as_ref().map(|_| new_pointer_local(ctx));
     if let Some(c) = &cache {
         gen_tlb_cache_hit_condition(ctx, bits, address, true);
-        ctx.builder.if_void();
+        ctx.builder.if_void_likely();
         ctx.builder.const_i32(1);
         ctx.builder.set_local(&can_use_fast_path);
         gen_pointer_from_entry(ctx, address, &cached_entry_val(c));
@@ -2584,7 +2592,7 @@ pub fn gen_safe_read_write(
     let fastpop = cache.as_ref().map(|_| ctx.builder.block_void());
     let entry = gen_tlb_fast_path_check(ctx, bits, address, true);
     ctx.builder.tee_local(&can_use_fast_path);
-    ctx.builder.br_if(fastpop.unwrap_or(cont));
+    ctx.builder.br_if_likely(fastpop.unwrap_or(cont));
 
     // may deliver a page fault, which reads the flags: commit the deferred lazy flags
     // (still those of the previous instructions: f runs after this at runtime)
@@ -2601,7 +2609,7 @@ pub fn gen_safe_read_write(
     if cfg!(feature = "mem64") {
         ctx.builder.const_i32(1);
         ctx.builder.and_i32();
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
         codegen::gen_load_slow_entry(ctx);
         ctx.builder.set_local_i64(match &entry {
             Val::I64(l) => l,
@@ -2615,7 +2623,7 @@ pub fn gen_safe_read_write(
         });
         ctx.builder.const_i32(1);
         ctx.builder.and_i32();
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
     }
     if fastpop.is_some() {
         // the slow path's entry may point into mapped memory or scratch: only the fast
@@ -2655,12 +2663,12 @@ pub fn gen_safe_read_write(
     // memory have to be done by the slow path for writing
     ctx.builder.get_local(&can_use_fast_path);
     ctx.builder.eqz_i32();
-    ctx.builder.if_void();
+    ctx.builder.if_void_unlikely();
     {
         gen_write_slow_path(ctx, bits, address, &value);
         ctx.builder.const_i32(1);
         ctx.builder.and_i32();
-        ctx.builder.br_if(ctx.exit_with_fault_label);
+        ctx.builder.br_if_unlikely(ctx.exit_with_fault_label);
     }
     ctx.builder.block_end();
     ctx.builder.free_local(can_use_fast_path);

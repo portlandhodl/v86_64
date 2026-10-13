@@ -68,9 +68,11 @@ export function RTC(cpu)
     this.cmos_index = 0;
     this.cmos_data = new Uint8Array(128);
 
-    // used for cmos entries
+    // used for cmos entries; rtc_time stays in Date.now() (epoch) domain,
+    // all timer bookkeeping is in v86.microtick() domain (what
+    // run_hardware_timers passes to RTC.prototype.timer)
     this.rtc_time = Date.now();
-    this.last_update = this.rtc_time;
+    this.last_update = v86.microtick();
 
     // used for periodic interrupt
     this.next_interrupt = 0;
@@ -148,7 +150,6 @@ RTC.prototype.set_state = function(state)
 
 RTC.prototype.timer = function(time, legacy_mode)
 {
-    time = Date.now(); // XXX
     this.rtc_time += time - this.last_update;
     this.last_update = time;
 
@@ -352,7 +353,7 @@ RTC.prototype.cmos_port_write = function(data_byte)
             }
             if(this.cmos_b & 0x40)
             {
-                this.next_interrupt = Date.now();
+                this.next_interrupt = v86.microtick();
             }
 
             if(this.cmos_b & 0x20)
@@ -373,13 +374,13 @@ RTC.prototype.cmos_port_write = function(data_byte)
                         " hh:mm:ss=" + hours + ":" + minutes + ":" + seconds +
                         " ms_from_now=" + ms_from_now, LOG_RTC);
 
-                this.next_interrupt_alarm = +alarm_date;
+                this.next_interrupt_alarm = v86.microtick() + ms_from_now;
             }
 
             if(this.cmos_b & 0x10)
             {
                 dbg_log("update interrupt", LOG_RTC);
-                this.update_interrupt_time = Date.now();
+                this.update_interrupt_time = v86.microtick();
             }
 
             dbg_log("cmos b=" + h(this.cmos_b, 2), LOG_RTC);

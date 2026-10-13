@@ -872,7 +872,11 @@ VGAScreen.prototype.text_mode_redraw = function()
             const font_page_b = this.font_page_ab_enabled && !(color & 1 << 3);
             const flags = (blinking ? FLAG_BLINKING : 0) | (font_page_b ? FLAG_FONT_PAGE_B : 0);
 
-            this.bus.send("screen-put-char", [row, col, chr]);
+            // skip the array allocation when nobody is listening
+            if(this.bus.has_listeners("screen-put-char"))
+            {
+                this.bus.send("screen-put-char", [row, col, chr]);
+            }
 
             this.screen.put_char(row, col, chr, flags,
                 this.vga256_palette[this.dac_mask & this.dac_map[color >> 4 & bg_color_mask]],
@@ -934,7 +938,11 @@ VGAScreen.prototype.vga_memory_write_text_mode = function(addr, value)
     const fg_color_mask = this.font_page_ab_enabled ? 7 : 0xF;
     const bg_color_mask = blink_enabled ? 7 : 0xF;
 
-    this.bus.send("screen-put-char", [row, col, chr]);
+    // skip the array allocation when nobody is listening
+    if(this.bus.has_listeners("screen-put-char"))
+    {
+        this.bus.send("screen-put-char", [row, col, chr]);
+    }
 
     this.screen.put_char(row, col, chr, flags,
         this.vga256_palette[this.dac_mask & this.dac_map[color >> 4 & bg_color_mask]],

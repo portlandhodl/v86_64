@@ -147,48 +147,90 @@ export function V86(options)
                     v86_bin_fallback = v86_bin_fallback && "build/" + v86_bin_fallback;
                 }
 
-                load_file(v86_bin, {
-                    done: async bytes =>
+                const send_progress = e =>
+                {
+                    this.emulator_bus.send("download-progress", {
+                        file_index: 0,
+                        file_count: 1,
+                        file_name: v86_bin,
+
+                        lengthComputable: e.lengthComputable,
+                        total: e.total,
+                        loaded: e.loaded,
+                    });
+                };
+
+                const load_and_instantiate = () =>
+                {
+                    load_file(v86_bin, {
+                        done: async bytes =>
+                        {
+                            try
+                            {
+                                const { instance } = await WebAssembly.instantiate(bytes, env);
+                                this.wasm_source = bytes;
+                                resolve(instance.exports);
+                            }
+                            catch(err)
+                            {
+                                if(v86_bin_fallback)
+                                {
+                                    load_file(v86_bin_fallback, {
+                                            done: async bytes => {
+                                                const { instance } = await WebAssembly.instantiate(bytes, env);
+                                                this.wasm_source = bytes;
+                                                resolve(instance.exports);
+                                            },
+                                        });
+                                }
+                                else
+                                {
+                                    // mem64 build: needs memory64 + multi-memory
+                                    // (Node 22+, not Safari), don't fall back
+                                    reject(err);
+                                }
+                            }
+                        },
+                        progress: send_progress,
+                    });
+                };
+
+                if(typeof WebAssembly.instantiateStreaming === "function" && typeof fetch === "function")
+                {
+                    // Compile while downloading. A second fetch of the same url
+                    // (served from cache; Chrome also caches the compiled module
+                    // per url) fetches the raw bytes for this.wasm_source, which
+                    // the zstd worker needs.
+                    const instantiate = WebAssembly.instantiateStreaming(fetch(v86_bin), env);
+                    const bytes = fetch(v86_bin).then(response => response.arrayBuffer());
+
+                    instantiate.then(async ({ instance }) =>
                     {
                         try
                         {
-                            const { instance } = await WebAssembly.instantiate(bytes, env);
-                            this.wasm_source = bytes;
-                            resolve(instance.exports);
+                            this.wasm_source = await bytes;
                         }
-                        catch(err)
+                        catch(e)
                         {
-                            if(v86_bin_fallback)
-                            {
-                                load_file(v86_bin_fallback, {
-                                        done: async bytes => {
-                                            const { instance } = await WebAssembly.instantiate(bytes, env);
-                                            this.wasm_source = bytes;
-                                            resolve(instance.exports);
-                                        },
-                                    });
-                            }
-                            else
-                            {
-                                // mem64 build: needs memory64 + multi-memory
-                                // (Node 22+, not Safari), don't fall back
-                                reject(err);
-                            }
+                            console.warn("Could not fetch raw wasm bytes, the zstd worker is unavailable", e);
                         }
-                    },
-                    progress: e =>
-                    {
-                        this.emulator_bus.send("download-progress", {
-                            file_index: 0,
-                            file_count: 1,
-                            file_name: v86_bin,
 
-                            lengthComputable: e.lengthComputable,
-                            total: e.total,
-                            loaded: e.loaded,
-                        });
-                    }
-                });
+                        const length = this.wasm_source ? this.wasm_source.byteLength : 0;
+                        send_progress({ lengthComputable: length > 0, total: length, loaded: length });
+
+                        resolve(instance.exports);
+                    }, () =>
+                    {
+                        // server without the application/wasm mime type or no
+                        // streaming support: use the old xhr + instantiate path
+                        bytes.catch(() => {});
+                        load_and_instantiate();
+                    });
+                }
+                else
+                {
+                    load_and_instantiate();
+                }
             });
         };
     }
