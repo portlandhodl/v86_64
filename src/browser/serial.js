@@ -3,6 +3,10 @@ import { dbg_assert, dbg_log } from "../log.js";
 // For Types Only
 import { BusConnector } from "../bus.js";
 
+// Cap of the scrollback history retained by TextAreaAdapter (this.text):
+// the last 1 MiB of output, older content is dropped from the front
+const MAX_OUTPUT_LENGTH = 1024 * 1024;
+
 /**
  * @constructor
  *
@@ -55,6 +59,14 @@ function TextAreaAdapter(element)
         else
         {
             this.text += chr;
+
+            if(this.text.length > MAX_OUTPUT_LENGTH)
+            {
+                // drop old history from the front, aligned to a newline when
+                // possible so a partial line isn't kept at the start
+                const cut = this.text.indexOf("\n", this.text.length - MAX_OUTPUT_LENGTH);
+                this.text = cut === -1 ? this.text.slice(-MAX_OUTPUT_LENGTH) : this.text.slice(cut + 1);
+            }
 
             if(chr === "\n")
             {
@@ -199,10 +211,12 @@ export function SerialAdapter(element, bus)
         bus.send("serial0-input", chr_code);
     };
 
-    bus.register("serial0-output-byte", function(byte)
+    bus.register("serial0-output-bytes", function(bytes)
     {
-        var chr = String.fromCharCode(byte);
-        adapter.show_char && adapter.show_char(chr);
+        for(const byte of bytes)
+        {
+            adapter.show_char && adapter.show_char(String.fromCharCode(byte));
+        }
     }, adapter);
 
     return adapter;
@@ -251,10 +265,12 @@ function SerialRecordingAdapter(bus)
     var serial = this;
     this.text = "";
 
-    bus.register("serial0-output-byte", function(byte)
+    bus.register("serial0-output-bytes", function(bytes)
     {
-        var chr = String.fromCharCode(byte);
-        this.text += chr;
+        for(const byte of bytes)
+        {
+            this.text += String.fromCharCode(byte);
+        }
     }, this);
 }
 
@@ -301,9 +317,9 @@ export function SerialAdapterXtermJS(element, bus, xterm_lib)
 
     var adapter = Reflect.construct(XtermJSAdapter, [element, xterm_lib], SerialAdapterXtermJS);
 
-    bus.register("serial0-output-byte", function(utf8_byte)
+    bus.register("serial0-output-bytes", function(utf8_bytes)
     {
-        adapter.term.write(Uint8Array.of(utf8_byte));
+        adapter.term.write(utf8_bytes);
     }, adapter);
 
     const utf8_encoder = new TextEncoder();
