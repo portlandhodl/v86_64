@@ -194,6 +194,14 @@ if(process.env.JIT64_CHAINING === "0")
     });
 }
 
+// JIT32_CHAINING=0: don't chain 16/32-bit modules
+if(process.env.JIT32_CHAINING === "0")
+{
+    emulator.bus.register("emulator-started", () => {
+        emulator.v86.cpu.wm.exports["set_jit_config"](10, 0);
+    });
+}
+
 // JIT_THRESHOLD=<n>: compile code after n executed instructions instead of the default
 // (a low value exercises the jit on all of the test's code)
 if(process.env.JIT_THRESHOLD)

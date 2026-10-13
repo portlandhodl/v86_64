@@ -11,7 +11,6 @@ use crate::codegen;
 use crate::control_flow;
 use crate::control_flow::WasmStructure;
 use crate::cpu::cpu;
-use crate::cpu::global_pointers;
 use crate::cpu::memory;
 use crate::cpu_context::CpuContext;
 use crate::jit_instructions;
@@ -69,6 +68,8 @@ static mut JIT64_DISABLED: bool = false;
 // let modules for 64-bit code continue directly with the next module through a tail call
 // (jit64::gen_chain_to_next_module). Enabled by the host if it supports wasm tail calls.
 static mut JIT64_CHAINING: bool = false;
+// the same for modules for 16/32-bit code (codegen::gen_chain_to_next_module32)
+static mut JIT32_CHAINING: bool = false;
 
 // Maximum number of pages per wasm module. Necessary for the following reasons:
 // - There is an upper limit on the size of a single function in wasm (currently ~7MB in all browsers)
@@ -1507,11 +1508,23 @@ fn jit_generate_module(
 ) -> Vec<(u64, u16)> {
     builder.reset();
 
-    // the 64-bit jit keeps registers in i64 locals (register_locals64), which are the parameters
-    // of the module's function
-    let chaining = state_flags.is_64() && unsafe { JIT64_CHAINING };
+    // Modules take the guest registers as parameters of the module's function (the 64-bit jit
+    // in 16 i64 parameters (register_locals64), the 32-bit jit in 8 i32 parameters
+    // (register_locals)); the initial state is parameter 0. The signature doesn't vary with
+    // chaining, so that tail calls between modules compiled with different chaining settings
+    // are valid; chaining only decides whether the table is imported and the exit code
+    // tail-calls the next module.
+    let chaining = if state_flags.is_64() {
+        unsafe { JIT64_CHAINING }
+    }
+    else {
+        unsafe { JIT32_CHAINING }
+    };
     if state_flags.is_64() {
         builder.set_jit64_function(chaining);
+    }
+    else {
+        builder.set_jit32_function(chaining);
     }
     let register_locals64: Vec<WasmLocalI64> = if state_flags.is_64() {
         (0..16).map(|i| builder.arg_local_reg64(i)).collect()
@@ -1523,12 +1536,7 @@ fn jit_generate_module(
         Vec::new()
     }
     else {
-        (0..8)
-            .map(|i| {
-                builder.load_fixed_i32(global_pointers::get_reg32_offset(i));
-                builder.set_new_local()
-            })
-            .collect()
+        (0..8).map(|i| builder.arg_local_reg32(i)).collect()
     };
 
     builder.const_i32(0);
@@ -1560,7 +1568,7 @@ fn jit_generate_module(
     };
 
     // with chaining, the exit code looks up the next entry point and continues here if it's
-    // in this module (see jit64::gen_chain_to_next_module)
+    // in this module (see jit64::gen_chain_to_next_module / codegen::gen_chain_to_next_module32)
     let reenter_label = if chaining { Some(builder.loop_void()) } else { None };
     let exit_label = builder.block_void();
     let exit_with_fault_label = builder.block_void();
@@ -2389,7 +2397,12 @@ fn jit_generate_module(
         crate::jit64::gen_commit_deferred_flags(ctx);
         if let Some(reenter_label) = reenter_label {
             codegen::gen_update_instruction_counter(ctx);
-            crate::jit64::gen_chain_to_next_module(ctx, reenter_label);
+            if state_flags.is_64() {
+                crate::jit64::gen_chain_to_next_module(ctx, reenter_label);
+            }
+            else {
+                codegen::gen_chain_to_next_module32(ctx, reenter_label);
+            }
             codegen::gen_move_registers_from_locals_to_memory(ctx);
             ctx.builder.block_end(); // reenter_label
         }
@@ -2399,9 +2412,8 @@ fn jit_generate_module(
         }
     }
 
-    for local in ctx.register_locals.drain(..) {
-        ctx.builder.free_local(local);
-    }
+    // the 32-bit registers are parameters of the module's function, not allocated locals
+    ctx.register_locals.clear();
     if let Some(fl) = ctx.jit64_flag_locals.take() {
         ctx.builder.free_local_i64(fl.op1);
         ctx.builder.free_local_i64(fl.result);
@@ -2926,8 +2938,9 @@ pub fn check_dispatcher_target(target_index: i32, max: i32) {
 #[no_mangle]
 #[cfg(feature = "profiler")]
 pub fn enter_basic_block(phys_eip: u64) {
-    let eip =
-        unsafe { cpu::translate_address_read(*global_pointers::instruction_pointer).unwrap() };
+    let eip = unsafe {
+        cpu::translate_address_read(*crate::cpu::global_pointers::instruction_pointer).unwrap()
+    };
     if Page::page_of(eip) != Page::page_of(phys_eip) {
         dbg_log!(
             "enter basic block failed block=0x{:x} actual eip=0x{:x}",
@@ -2951,6 +2964,7 @@ pub unsafe fn set_jit_config(index: u32, value: u32) {
         7 => JIT64_CHAINING = value != 0,
         8 => crate::jit64::JIT64_DEFER_FLAGS = value != 0,
         9 => crate::jit64::JIT64_TLB_CACHE = value != 0,
+        10 => JIT32_CHAINING = value != 0,
         _ => dbg_assert!(false),
     }
 }
@@ -2967,6 +2981,7 @@ pub unsafe fn get_jit_config(index: u32) -> u32 {
         7 => JIT64_CHAINING as u32,
         8 => crate::jit64::JIT64_DEFER_FLAGS as u32,
         9 => crate::jit64::JIT64_TLB_CACHE as u32,
+        10 => JIT32_CHAINING as u32,
         _ => 0,
     }
 }

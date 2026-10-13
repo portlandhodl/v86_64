@@ -246,7 +246,11 @@ Nothing known hits these.
   pre-decoded `jit64_*` wrappers that return `JIT64_EXIT` when the module has
   to be left.
 - Module chaining: modules take the registers as arguments and continue
-  through a wasm tail call to the next entry.
+  through a wasm tail call to the next entry. The 32-bit jit chains the
+  same way (`codegen::gen_chain_to_next_module32`, 8 i32 register
+  arguments), with the same guards (hlt, TF/RF, debug, instruction budget)
+  and the flat `tlb_code` lookup only (32-bit linear addresses are below
+  4 GiB).
 - Deferred lazy flags keep last_op1/last_result in function-wide locals and
   commit at observation points: block ends, interpreter calls, and cold
   commits on memory slow paths.
@@ -254,7 +258,8 @@ Nothing known hits these.
   zeroed at interpreter calls, the only places where mappings can change.
 - Switches: `set_jit_config(4, 1)` disables JIT64, `(5, n)` sets the hotness
   threshold (`JIT_THRESHOLD`), `(7, 0)` disables chaining
-  (`JIT64_CHAINING=0`), `(8, 0)` restores eager flag stores
+  (`JIT64_CHAINING=0`, `(10, 0)` for 32-bit chaining, `JIT32_CHAINING=0`),
+  `(8, 0)` restores eager flag stores
   (`JIT64_DEFER_FLAGS=0`), and `(9, 0)` disables the data TLB cache
   (`JIT64_TLB_CACHE=0`). Setting `NATIVE64_SKIP=group,...` at generation time
   falls back to the interpreter for groups of native instructions, which
